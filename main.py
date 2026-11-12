@@ -17,17 +17,17 @@ DB_PATH = "seen_jobs.db"
 
 # Rotating daily queries (4 searches/day = ~120/month)
 EVEN_DAY_QUERIES = [
-    {"q": '("produktionsingenjör" OR "simuleringsingenjör" OR "logistikingenjör" OR "industriell ekonomi")', "location": "Stockholm, Sweden", "gl": "se", "hl": "sv"},
-    {"q": '("produktionsingenjör" OR "simuleringsingenjör" OR "produktionsutvecklare" OR "civilingenjör")', "location": "Örebro, Sweden", "gl": "se", "hl": "sv"},
-    {"q": '("produktionsingenjör" OR "logistikingenjör" OR "supply chain" OR "simulation engineer")', "location": "Malmö, Sweden", "gl": "se", "hl": "sv"},
-    {"q": '("simulation engineer" OR "production engineer" OR "graduate engineer" OR "operations analyst")', "location": "Copenhagen, Denmark", "gl": "dk", "hl": "en"},
+    {"q": "produktionsingenjör OR simuleringsingenjör OR logistikingenjör", "location": "Stockholm, Sweden", "gl": "se", "hl": "sv"},
+    {"q": "produktionsingenjör OR simuleringsingenjör OR civilingenjör", "location": "Örebro, Sweden", "gl": "se", "hl": "sv"},
+    {"q": "produktionsingenjör OR logistikingenjör OR supply chain", "location": "Malmö, Sweden", "gl": "se", "hl": "sv"},
+    {"q": "simulation engineer OR production engineer OR graduate engineer", "location": "Copenhagen, Denmark", "gl": "dk", "hl": "en"},
 ]
 
 ODD_DAY_QUERIES = [
-    {"q": '("simulation engineer" OR "production engineer" OR "supply chain" OR "graduate trainee")', "location": "Stockholm, Sweden", "gl": "se", "hl": "en"},
-    {"q": '("simulation engineer" OR "mechanical engineer" OR "production engineer" OR "lean")', "location": "Örebro, Sweden", "gl": "se", "hl": "en"},
-    {"q": '("production engineer" OR "continuous improvement" OR "logistics engineer" OR "industrial engineer")', "location": "Copenhagen, Denmark", "gl": "dk", "hl": "en"},
-    {"q": '("simulation engineer" OR "systems engineer" OR "digital twin" OR "modeling")', "location": "Oslo, Norway", "gl": "no", "hl": "en"},
+    {"q": "simulation engineer OR production engineer OR supply chain", "location": "Stockholm, Sweden", "gl": "se", "hl": "en"},
+    {"q": "simulation engineer OR mechanical engineer OR production engineer", "location": "Örebro, Sweden", "gl": "se", "hl": "en"},
+    {"q": "production engineer OR continuous improvement OR logistics engineer", "location": "Copenhagen, Denmark", "gl": "dk", "hl": "en"},
+    {"q": "simulation engineer OR systems engineer OR digital twin", "location": "Oslo, Norway", "gl": "no", "hl": "en"},
 ]
 
 # --- PYDANTIC SCHEMA FOR STRUCTURED OUTPUT ---
@@ -84,7 +84,7 @@ You are an expert technical recruiter and talent evaluator in Scandinavia. Evalu
 ### GEOGRAPHIC & DOMAIN RULES:
 1. Primary Regions: Malmö, Örebro, Stockholm, and ~1h commute (Lund, Copenhagen, Södertälje, Karlskoga, Eskilstuna, Västerås, Helsingborg).
 2. Oslo Exception: Roles in Oslo are eligible ONLY if overall_score is 9 or 10. Otherwise set fit_verdict to "SKIP".
-3. Defense Exclusion: Disqualify immediately (overall_score: 1, fit_verdict: "SKIP") if the company or role involves the defense, weapons, armament, or military technology industry.
+3. Defense Exclusion: Disqualify immediately (overall_score: 1, fit_verdict: "SKIP") if the company or role involves the defense, weapons, armament, or military industry.
 
 ### TRAIT & SCORING RULES:
 - Personal Traits: List requested traits. ONLY rate fit if the ad asks for a *proven track record* or documented experience of that trait. Otherwise set proven_record_required: false and fit_rating: "N/A".
@@ -116,16 +116,19 @@ def fetch_jobs():
             "location": q_cfg["location"],
             "gl": q_cfg["gl"],
             "hl": q_cfg["hl"],
-            "lrad": "70",  # ~70 km commuter radius
             "api_key": SERPAPI_KEY,
         }
         try:
             resp = requests.get("https://serpapi.com/search", params=params, timeout=30)
             data = resp.json()
-            for job in data.get("jobs_results", []):
-                all_jobs.append(job)
+            if "error" in data:
+                print(f"SerpApi error for {q_cfg['location']}: {data['error']}")
+                continue
+            results = data.get("jobs_results", [])
+            print(f"{q_cfg['location']}: found {len(results)} jobs")
+            all_jobs.extend(results)
         except Exception as e:
-            print(f"Search error for {q_cfg['location']}: {e}")
+            print(f"Search exception for {q_cfg['location']}: {e}")
     return all_jobs
 
 def evaluate_job(client: genai.Client, job: dict) -> JobEvaluation | None:
@@ -210,8 +213,10 @@ def send_discord_embed(eval_data: JobEvaluation, apply_url: str):
         ],
     }
 
-    requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]}, timeout=15)
-    time.sleep(1.5)  # Respect Discord webhook rate limits
+    resp = requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]}, timeout=15)
+    if resp.status_code not in (200, 204):
+        print(f"Discord webhook error {resp.status_code}: {resp.text}")
+    time.sleep(1.5)
 
 def main():
     conn = init_db()
@@ -244,7 +249,6 @@ def main():
             apply_url = apply_options[0].get("link") if apply_options else job.get("share_link", "https://www.google.com")
             matches.append((evaluation, apply_url))
 
-    # Sort best matches first and cap at top 20 per day
     matches.sort(key=lambda x: x[0].overall_score, reverse=True)
     for eval_data, url in matches[:20]:
         send_discord_embed(eval_data, url)

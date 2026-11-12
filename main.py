@@ -16,7 +16,7 @@ SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "")
 DB_PATH = "seen_jobs.db"
 AF_API_URL = "https://jobsearch.api.jobtechdev.se/search"
 BATCH_SIZE = 3
-MAX_RETRIES = 3
+FALLBACK_MODELS = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
 
 STOCKHOLM_QUERIES = [
     {"q": "simuleringsingenjör Stockholm", "limit": 15},
@@ -220,10 +220,10 @@ def evaluate_batch(client: genai.Client, batch: list[dict]) -> list[JobEvaluatio
         blocks.append(block)
     prompt_text = "\n\n".join(blocks)
 
-    for attempt in range(MAX_RETRIES):
+    for attempt, model_name in enumerate(FALLBACK_MODELS):
         try:
             response = client.models.generate_content(
-                model="gemini-3.8-flash",
+                model=model_name,
                 contents=prompt_text,
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_PROMPT,
@@ -234,13 +234,11 @@ def evaluate_batch(client: genai.Client, batch: list[dict]) -> list[JobEvaluatio
             )
             if response.parsed and response.parsed.evaluations:
                 count = len(response.parsed.evaluations)
-                print(f"Batch evaluated ({count} jobs) via gemini-3.8-flash", flush=True)
+                print(f"Batch evaluated ({count} jobs) via {model_name}", flush=True)
                 return response.parsed.evaluations
         except Exception as e:
-            print(f"Attempt {attempt + 1} failed: {e}", flush=True)
-            if "RESOURCE_EXHAUSTED" in str(e) and "limit: 20" in str(e):
-                break
-            time.sleep(8)
+            print(f"Attempt {attempt + 1} ({model_name}) failed: {e}", flush=True)
+            time.sleep(4)
     return []
 
 
@@ -358,4 +356,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    

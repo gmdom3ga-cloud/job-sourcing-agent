@@ -141,7 +141,7 @@ def fetch_jobs():
                     "title": title,
                     "company_name": company,
                     "location": location,
-                    "description": (hit.get("description") or {}).get("text", "")[:6000],
+                    "description": (hit.get("description") or {}).get("text", "")[:5000],
                     "apply_url": hit.get("webpage_url", "https://arbetsformedlingen.se/platsbanken"),
                     "employment_type": (hit.get("working_hours_type") or {}).get("label", ""),
                 })
@@ -160,6 +160,7 @@ def evaluate_job(client: genai.Client, job: dict) -> JobEvaluation | None:
                 response_mime_type="application/json",
                 response_schema=JobEvaluation,
                 temperature=0.2,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
             ),
         )
         return response.parsed
@@ -212,7 +213,7 @@ def send_discord_embed(eval_data: JobEvaluation, apply_url: str, quota_text: str
 
 def main():
     conn = init_db()
-    client = genai.Client(api_key=GEMINI_API_KEY, http_options={"timeout": 20})
+    client = genai.Client(api_key=GEMINI_API_KEY, http_options={"timeout": 60})
     raw_jobs = fetch_jobs()
     print(f"Fetched {len(raw_jobs)} unique raw jobs.", flush=True)
 
@@ -235,7 +236,7 @@ def main():
             if evaluation.fit_verdict != "SKIP" and evaluation.overall_score >= 7:
                 matches.append((evaluation, job.get("apply_url", "https://arbetsformedlingen.se/platsbanken")))
 
-        time.sleep(4)
+        time.sleep(3)
 
     quota_text = get_serpapi_quota()
     matches.sort(key=lambda x: x[0].overall_score, reverse=True)
@@ -250,4 +251,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    

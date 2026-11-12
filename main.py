@@ -55,25 +55,25 @@ TEAMTAILOR_FEEDS = [
     {"company": "ONE Nordic", "url": "https://karriar.one-nordic.se/jobs.rss"},
 ]
 
-# 3. Free Direct Scraper: JobSpy (LinkedIn + Indeed Full Descriptions)
+# 3. Free Direct Scraper: JobSpy (Indeed Full Descriptions; LinkedIn handled via SerpApi)
 JOBSPY_QUERIES = [
     {
         "search_term": "simulation engineer OR production engineer OR graduate engineer",
         "location": "Stockholm, Sweden",
         "country_indeed": "Sweden",
-        "sites": ["linkedin", "indeed"],
+        "sites": ["indeed"],
     },
     {
         "search_term": "production engineer OR process engineer OR industrial engineer",
         "location": "Malmö, Sweden",
         "country_indeed": "Sweden",
-        "sites": ["linkedin", "indeed"],
+        "sites": ["indeed"],
     },
     {
         "search_term": "mechanical engineer OR production engineer",
         "location": "Örebro, Sweden",
         "country_indeed": "Sweden",
-        "sites": ["linkedin", "indeed"],
+        "sites": ["indeed"],
     },
     {
         "search_term": "simulation engineer OR production engineer OR graduate engineer",
@@ -559,7 +559,7 @@ def fetch_teamtailor_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
     return added
 
 
-# --- SCRAPER 3: JOBSPY (LINKEDIN + INDEED FULL DESCRIPTIONS) ---
+# --- SCRAPER 3: JOBSPY (INDEED FULL DESCRIPTIONS) ---
 def fetch_jobspy_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
     added = 0
     for q_cfg in JOBSPY_QUERIES:
@@ -571,7 +571,7 @@ def fetch_jobspy_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
                 results_wanted=12,
                 hours_old=72,
                 country_indeed=q_cfg["country_indeed"],
-                linkedin_fetch_description=True,
+                fetch_description=True,
                 verbose=0,
             )
             raw_count = len(df) if df is not None else 0
@@ -582,7 +582,7 @@ def fetch_jobspy_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
                     apply_url = (
                         clean_str(row.get("job_url_direct"))
                         or clean_str(row.get("job_url"))
-                        or "https://www.linkedin.com/jobs"
+                        or "https://se.indeed.com"
                     )
                     ok = register_job(
                         {

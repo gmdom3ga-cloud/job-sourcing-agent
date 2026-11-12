@@ -131,6 +131,17 @@ EXCLUDED_TITLE_KEYWORDS = [
     "network",
     "säkerhet",
     "it-",
+    # Pure Wet-Lab Chemistry, Biology & Food Science (keeps Pharma Process/Device Engineering!)
+    "biokemist",
+    "kemist",
+    "kemiingenjör",
+    "biolog",
+    "mikrobiolog",
+    "laboratorie",
+    "labbingenjör",
+    "farmaceut",
+    "livsmedel",
+    "food",
     # Construction, Civil, Building, HVAC & Electrical Infrastructure
     "bygg",
     "konstruktör",
@@ -187,6 +198,7 @@ EXCLUDED_TITLE_KEYWORDS = [
     "financial controlling",
     "redovisningsekonom",
 ]
+
 
 ALLOWED_LOCATIONS = [
     "stockholm",

@@ -16,7 +16,7 @@ SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "")
 DB_PATH = "seen_jobs.db"
 AF_API_URL = "https://jobsearch.api.jobtechdev.se/search"
 BATCH_SIZE = 6
-GEMINI_MODELS = ["gemini-3.8-flash", "gemini-3.8-flash-lite"]
+GEMINI_MODELS = ["gemini-3.8-flash", "gemini-flash-latest", "gemini-3.8-flash"]
 
 STOCKHOLM_QUERIES = [
     {"q": "simuleringsingenjör Stockholm", "limit": 15},
@@ -26,9 +26,19 @@ STOCKHOLM_QUERIES = [
 ]
 
 EXCLUDED_TITLE_KEYWORDS = [
-    "byggkonstruktör", "elkraft", "högspänning", "high-voltage", "hvdc",
-    "telecommunications", "el och automation", "bim-specialist", "kärnkraft",
-    "försvarsmakten", "saab", "bae systems", "fmv"
+    "byggkonstruktör",
+    "elkraft",
+    "högspänning",
+    "high-voltage",
+    "hvdc",
+    "telecommunications",
+    "el och automation",
+    "bim-specialist",
+    "kärnkraft",
+    "försvarsmakten",
+    "saab",
+    "bae systems",
+    "fmv",
 ]
 
 # --- PYDANTIC SCHEMA FOR BATCH STRUCTURED OUTPUT ---
@@ -37,14 +47,17 @@ class RequirementItem(BaseModel):
     fit_rating: Literal["Strong Match", "Partial Match", "Stretch", "Gap"]
     note: str
 
+
 class SkillItem(BaseModel):
     skill: str
     fit_rating: Literal["Strong", "Moderate", "None"]
+
 
 class TraitItem(BaseModel):
     trait: str
     proven_record_required: bool
     fit_rating: Literal["Strong", "Moderate", "N/A"]
+
 
 class RequirementsBreakdown(BaseModel):
     education: RequirementItem
@@ -52,6 +65,7 @@ class RequirementsBreakdown(BaseModel):
     skills_mandatory: List[SkillItem]
     skills_meritorious: List[SkillItem]
     personal_traits: List[TraitItem]
+
 
 class JobEvaluation(BaseModel):
     job_index: int
@@ -68,8 +82,10 @@ class JobEvaluation(BaseModel):
     fit_verdict: Literal["APPLY", "CONSIDER", "SKIP"]
     match_rationale: str
 
+
 class BatchEvaluation(BaseModel):
     evaluations: List[JobEvaluation]
+
 
 SYSTEM_PROMPT = """
 You are an expert technical recruiter and talent evaluator in Scandinavia. You will receive a numbered batch of job descriptions. Evaluate EVERY job in the batch independently against the candidate's profile, preserve its exact `job_index`, break down requirements, rate fit, and assign an overall relevance score (1-10).
@@ -99,22 +115,32 @@ You are an expert technical recruiter and talent evaluator in Scandinavia. You w
 - 1-4: Irrelevant field, 7+ yrs senior requirement, outside target locations, or defense sector.
 """
 
+
 # --- DATABASE & QUOTA FUNCTIONS ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("CREATE TABLE IF NOT EXISTS seen_jobs (job_hash TEXT PRIMARY KEY, title TEXT, company TEXT, score INTEGER)")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS seen_jobs "
+        "(job_hash TEXT PRIMARY KEY, title TEXT, company TEXT, score INTEGER)"
+    )
     conn.commit()
     return conn
+
 
 def get_job_hash(title: str, company: str, location: str) -> str:
     raw = f"{title.lower().strip()}|{company.lower().strip()}|{location.lower().strip()}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
+
 def get_serpapi_quota() -> str:
     if not SERPAPI_KEY:
         return "SerpApi key not configured"
     try:
-        resp = requests.get("https://serpapi.com/account.json", params={"api_key": SERPAPI_KEY}, timeout=10)
+        resp = requests.get(
+            "https://serpapi.com/account.json",
+            params={"api_key": SERPAPI_KEY},
+            timeout=10,
+        )
         data = resp.json()
         left = data.get("plan_searches_left")
         total = data.get("searches_per_month")
@@ -124,9 +150,11 @@ def get_serpapi_quota() -> str:
         print(f"SerpApi quota check error: {e}", flush=True)
     return "Quota unavailable"
 
+
 def get_swedish_timestamp() -> str:
     cet = timezone(timedelta(hours=1))
     return datetime.now(cet).strftime("%Y-%m-%d %H:%M CET")
+
 
 # --- FETCH, BATCH EVALUATE & NOTIFY ---
 def fetch_jobs():
@@ -158,23 +186,30 @@ def fetch_jobs():
                     continue
                 seen_in_batch.add(j_hash)
 
-                all_jobs.append({
-                    "hash": j_hash,
-                    "title": title,
-                    "company_name": company,
-                    "location": location,
-                    "description": (hit.get("description") or {}).get("text", "")[:3200],
-                    "apply_url": hit.get("webpage_url", "https://arbetsformedlingen.se/platsbanken"),
-                    "employment_type": (hit.get("working_hours_type") or {}).get("label", ""),
-                })
+                desc_text = (hit.get("description") or {}).get("text", "")
+                emp_type = (hit.get("working_hours_type") or {}).get("label", "")
+                apply_url = hit.get("webpage_url", "https://arbetsformedlingen.se/platsbanken")
+
+                all_jobs.append(
+                    {
+                        "hash": j_hash,
+                        "title": title,
+                        "company_name": company,
+                        "location": location,
+                        "description": desc_text[:3200],
+                        "apply_url": apply_url,
+                        "employment_type": emp_type,
+                    }
+                )
         except Exception as e:
             print(f"Arbetsförmedlingen search error for '{q_cfg['q']}': {e}", flush=True)
     return all_jobs
 
+
 def evaluate_batch(client: genai.Client, batch: list[dict]) -> list[JobEvaluation]:
     blocks = []
     for idx, job in enumerate(batch):
-        blocks.append(
+        block = (
             f"=== JOB_INDEX: {idx} ===\n"
             f"Title: {job.get('title')}\n"
             f"Company: {job.get('company_name')}\n"
@@ -182,9 +217,10 @@ def evaluate_batch(client: genai.Client, batch: list[dict]) -> list[JobEvaluatio
             f"Employment Type: {job.get('employment_type')}\n"
             f"Description:\n{job.get('description', '')}"
         )
+        blocks.append(block)
     prompt_text = "\n\n".join(blocks)
 
-    for model_name in GEMINI_MODELS:
+    for attempt, model_name in enumerate(GEMINI_MODELS):
         try:
             response = client.models.generate_content(
                 model=model_name,
@@ -197,12 +233,14 @@ def evaluate_batch(client: genai.Client, batch: list[dict]) -> list[JobEvaluatio
                 ),
             )
             if response.parsed and response.parsed.evaluations:
-                print(f"Batch evaluated ({len(response.parsed.evaluations)} jobs) via {model_name}", flush=True)
+                count = len(response.parsed.evaluations)
+                print(f"Batch evaluated ({count} jobs) via {model_name}", flush=True)
                 return response.parsed.evaluations
         except Exception as e:
-            print(f"Model {model_name} failed for batch: {e}", flush=True)
-            continue
+            print(f"Attempt {attempt + 1} ({model_name}) failed: {e}", flush=True)
+            time.sleep(5)
     return []
+
 
 def format_skills(skills: list[SkillItem], limit: int = 5) -> str:
     if not skills:
@@ -214,6 +252,7 @@ def format_skills(skills: list[SkillItem], limit: int = 5) -> str:
         shown.append(f"*(+{extra} more)*")
     return " • ".join(shown)
 
+
 def send_discord_embed(eval_data: JobEvaluation, apply_url: str, quota_text: str, run_date: str):
     color = 0x2ECC71 if eval_data.overall_score >= 9 else 0xF1C40F
     badge = "🟢" if eval_data.overall_score >= 9 else "🟡"
@@ -221,7 +260,11 @@ def send_discord_embed(eval_data: JobEvaluation, apply_url: str, quota_text: str
 
     proven_traits = [t for t in rb.personal_traits if t.proven_record_required]
     if proven_traits:
-        traits_text = " • ".join([f"{'✅' if t.fit_rating == 'Strong' else '⚠️'} {t.trait}" for t in proven_traits])
+        trait_parts = [
+            f"{'✅' if t.fit_rating == 'Strong' else '⚠️'} {t.trait}"
+            for t in proven_traits
+        ]
+        traits_text = " • ".join(trait_parts)
     else:
         traits_text = "No proven track record required"
 
@@ -231,11 +274,12 @@ def send_discord_embed(eval_data: JobEvaluation, apply_url: str, quota_text: str
 
     mand_val = format_skills(rb.skills_mandatory)[:1024]
     merit_val = format_skills(rb.skills_meritorious)[:1024]
+    vision_short = eval_data.company_vision_values[:250]
 
     embed = {
         "title": f"{badge} {eval_data.overall_score}/10 — {eval_data.job_title} ({eval_data.company})",
         "url": apply_url,
-        "description": f"*{eval_data.match_rationale}*\n\n**🏛️ Vision & Culture:** {eval_data.company_vision_values[:250]}",
+        "description": f"*{eval_data.match_rationale}*\n\n**🏛️ Vision & Culture:** {vision_short}",
         "color": color,
         "footer": {"text": f"Searched: {run_date} • SerpApi Quota: {quota_text}"},
         "fields": [
@@ -256,6 +300,7 @@ def send_discord_embed(eval_data: JobEvaluation, apply_url: str, quota_text: str
         print(f"Discord webhook error {resp.status_code}: {resp.text}", flush=True)
     time.sleep(1.5)
 
+
 def main():
     conn = init_db()
     run_date = get_swedish_timestamp()
@@ -264,7 +309,8 @@ def main():
     print(f"[{run_date}] Fetched {len(raw_jobs)} filtered unique jobs.", flush=True)
 
     unseen_jobs = [
-        job for job in raw_jobs
+        job
+        for job in raw_jobs
         if not conn.execute("SELECT 1 FROM seen_jobs WHERE job_hash = ?", (job["hash"],)).fetchone()
     ]
     print(f"Unseen jobs to evaluate: {len(unseen_jobs)}", flush=True)
@@ -279,15 +325,20 @@ def main():
             if 0 <= ev.job_index < len(batch):
                 job = batch[ev.job_index]
                 evaluated_count += 1
-                print(f"[{evaluated_count}] {job['title']} -> {ev.overall_score}/10 ({ev.fit_verdict})", flush=True)
+                print(
+                    f"[{evaluated_count}] {job['title']} -> {ev.overall_score}/10 ({ev.fit_verdict})",
+                    flush=True,
+                )
                 conn.execute(
-                    "INSERT OR IGNORE INTO seen_jobs (job_hash, title, company, score) VALUES (?, ?, ?, ?)",
+                    "INSERT OR IGNORE INTO seen_jobs (job_hash, title, company, score) "
+                    "VALUES (?, ?, ?, ?)",
                     (job["hash"], job["title"], job["company_name"], ev.overall_score),
                 )
                 conn.commit()
 
                 if ev.fit_verdict != "SKIP" and ev.overall_score >= 7:
-                    matches.append((ev, job.get("apply_url", "https://arbetsformedlingen.se/platsbanken")))
+                    default_url = "https://arbetsformedlingen.se/platsbanken"
+                    matches.append((ev, job.get("apply_url", default_url)))
         time.sleep(2)
 
     quota_text = get_serpapi_quota()
@@ -295,11 +346,13 @@ def main():
     for eval_data, url in matches[:20]:
         send_discord_embed(eval_data, url, quota_text, run_date)
 
-    summary_payload = {
-        "content": f"📊 **Daily Job Scout ({run_date}):** Evaluated **{evaluated_count}** new jobs • Found **{len(matches)}** matches (7+) • SerpApi: **{quota_text}**"
-    }
-    requests.post(DISCORD_WEBHOOK_URL, json=summary_payload, timeout=15)
+    summary_text = (
+        f"📊 **Daily Job Scout ({run_date}):** Evaluated **{evaluated_count}** new jobs • "
+        f"Found **{len(matches)}** matches (7+) • SerpApi: **{quota_text}**"
+    )
+    requests.post(DISCORD_WEBHOOK_URL, json={"content": summary_text}, timeout=15)
     print(f"Done. Sent {min(len(matches), 20)} matching jobs to Discord.", flush=True)
+
 
 if __name__ == "__main__":
     main()

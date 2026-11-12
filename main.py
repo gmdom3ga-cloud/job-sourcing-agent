@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import html
 import math
 import calendar
@@ -23,7 +24,7 @@ SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "")
 DB_PATH = "seen_jobs.db"
 AF_API_URL = "https://jobsearch.api.jobtechdev.se/search"
 SERPAPI_URL = "https://serpapi.com/search.json"
-BATCH_SIZE = 10
+BATCH_SIZE = 5
 MAX_JOBS_PER_RUN = 60
 SERPAPI_TEST_RESERVE_RATIO = 0.15
 
@@ -89,26 +90,26 @@ JOBSPY_QUERIES = [
     },
 ]
 
-# 4. Quota-Paced: SerpApi Google X-Ray (Proxy-Protected LinkedIn, Indeed, DK & NO)
+# 4. Quota-Paced: SerpApi Google X-Ray (Direct Single-Job URLs Only)
 SERPAPI_XRAY_QUERIES = [
     {
-        "q": 'site:linkedin.com/jobs ("simulation engineer" OR "production engineer" OR "graduate engineer") (Stockholm OR Malmö OR Örebro)',
+        "q": 'site:linkedin.com/jobs/view ("simulation engineer" OR "production engineer" OR "graduate engineer") (Stockholm OR Malmö OR Örebro)',
         "location": "Sweden",
     },
     {
-        "q": 'site:se.indeed.com ("simuleringsingenjör" OR "produktionsingenjör" OR "industriell ekonomi" OR "graduate engineer")',
+        "q": 'site:se.indeed.com/viewjob ("simuleringsingenjör" OR "produktionsingenjör" OR "industriell ekonomi" OR "graduate engineer")',
         "location": "Sweden",
     },
     {
-        "q": 'site:linkedin.com/jobs ("simulation engineer" OR "production engineer" OR "graduate engineer") Copenhagen',
+        "q": 'site:linkedin.com/jobs/view ("simulation engineer" OR "production engineer" OR "graduate engineer") Copenhagen',
         "location": "Copenhagen",
     },
     {
-        "q": 'site:jobindex.dk ("simulation engineer" OR "production engineer" OR "industrial engineer")',
+        "q": 'site:jobindex.dk/vis-job ("simulation engineer" OR "production engineer" OR "industrial engineer")',
         "location": "Copenhagen",
     },
     {
-        "q": 'site:linkedin.com/jobs ("simulation engineer" OR "production engineer" OR "graduate engineer") Oslo',
+        "q": 'site:linkedin.com/jobs/view ("simulation engineer" OR "production engineer" OR "graduate engineer") Oslo',
         "location": "Oslo",
     },
     {
@@ -116,16 +117,22 @@ SERPAPI_XRAY_QUERIES = [
         "location": "Oslo",
     },
     {
-        "q": 'site:linkedin.com/jobs ("industrial management" OR "operations analyst" OR "lean engineer") (Stockholm OR Malmö OR Copenhagen)',
+        "q": 'site:linkedin.com/jobs/view ("industrial management" OR "operations analyst" OR "lean engineer") (Stockholm OR Malmö OR Copenhagen)',
         "location": "Nordics",
     },
     {
-        "q": 'site:linkedin.com/jobs ("mechanical engineer" OR "process engineer") (Örebro OR Stockholm OR Södertälje)',
+        "q": 'site:linkedin.com/jobs/view ("mechanical engineer" OR "process engineer") (Örebro OR Stockholm OR Södertälje)',
         "location": "Sweden",
     },
 ]
 
 EXCLUDED_TITLE_KEYWORDS = [
+    # Search/Aggregator Directory Pages & Non-Target Portals
+    "jobs i ",
+    "jobs in ",
+    "jobs near",
+    "lediga jobb",
+    "ziprecruiter",
     # Seniority & Non-Target IT/Network
     "senior ",
     "linux",
@@ -279,11 +286,12 @@ You are an expert technical recruiter in Scandinavia. Evaluate EVERY numbered jo
 - Languages: Swedish (Native), English (Fluent), Pashto/Dari (Fluent), Spanish (Basic).
 
 ### SCORING & EXCLUSION RULES:
-- Domain Exclusions (Score 1, `fit_verdict`: "SKIP"):
-  1. Defense, weapons, armament, or military industry.
-  2. Civil engineering, building construction (byggnadsingenjör / konstruktion / VVS / anläggning), or real estate construction.
-  3. Pure software development, web/app/cloud/IT engineering (software engineer / systemutvecklare). Note: Physical/industrial simulation, digital twins, HIL, and MATLAB/C++ modeling ARE relevant and should NOT be excluded.
-  4. Pure wet-lab chemistry, analytical biochemistry, microbiology, or R&D molecular biology (biokemist / kemist / labbingenjör / mikrobiolog). Note: Pharmaceutical manufacturing, process engineering, medical device assembly, Lean/operations, and discrete-event simulation at pharma companies (e.g., AstraZeneca) ARE highly relevant and should be scored high.
+- Domain & Page Exclusions (Score 1, `fit_verdict`: "SKIP"):
+  1. Job board search-result pages, category lists, or directory aggregators (not a single concrete job posting).
+  2. Defense, weapons, armament, or military industry.
+  3. Civil engineering, building construction (byggnadsingenjör / konstruktion / VVS / anläggning), or real estate construction.
+  4. Pure software development, web/app/cloud/IT engineering (software engineer / systemutvecklare). Note: Physical/industrial simulation, digital twins, HIL, and MATLAB/C++ modeling ARE relevant and should NOT be excluded.
+  5. Pure wet-lab chemistry, analytical biochemistry, microbiology, or R&D molecular biology (biokemist / kemist / labbingenjör / mikrobiolog). Note: Pharmaceutical manufacturing, process engineering, medical device assembly, Lean/operations, and discrete-event simulation at pharma companies (e.g., AstraZeneca) ARE highly relevant and should be scored high.
 - Primary Regions: Malmö, Örebro, Stockholm, and ~1h commute (Lund, Copenhagen, Södertälje, Karlskoga, Eskilstuna, Västerås, Helsingborg). Roles in other Swedish cities (e.g. Gothenburg) should be scored <= 5 (`fit_verdict`: "SKIP") unless remote/hybrid from target regions.
 - Oslo Exception: Roles in Oslo are eligible ONLY if `overall_score` is 9 or 10; otherwise set `fit_verdict` to "SKIP".
 - 9-10: Graduate/entry-level/trainee (0-2 yrs exp) matching IEM or Mechanical Engineering, simulation, Lean, or operations in target regions.
@@ -407,6 +415,55 @@ def clean_str(val) -> str:
     if isinstance(val, float) and math.isnan(val):
         return ""
     return str(val).strip()
+
+
+def enrich_xray_page(url: str, fallback_snippet: str) -> tuple[str, str, str]:
+    """Fetches static JobPosting JSON-LD or meta description from a single-job URL."""
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9,sv;q=0.8",
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=8)
+        if resp.status_code != 200:
+            return fallback_snippet, "", ""
+        page_html = resp.text
+
+        # 1. Try structured Schema.org JobPosting JSON-LD
+        for match in re.findall(
+            r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+            page_html,
+            flags=re.DOTALL | re.IGNORECASE,
+        ):
+            try:
+                data = json.loads(match.strip())
+                items = data if isinstance(data, list) else [data]
+                for obj in items:
+                    if isinstance(obj, dict) and obj.get("@type") == "JobPosting":
+                        desc = strip_html(obj.get("description") or "")
+                        posted = parse_iso_date(obj.get("datePosted"))
+                        valid_through = parse_iso_date(obj.get("validThrough"))
+                        if len(desc) > 120:
+                            return desc[:2800], posted, valid_through
+            except Exception:
+                continue
+
+        # 2. Fallback to OpenGraph / meta description
+        meta_m = re.search(
+            r'<meta[^>]+(?:name|property)=["\'](?:description|og:description)["\'][^>]+content=["\'](.*?)["\']',
+            page_html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if meta_m:
+            meta_desc = strip_html(meta_m.group(1))
+            if len(meta_desc) > len(fallback_snippet):
+                return f"{meta_desc}\nSnippet: {fallback_snippet}"[:2800], "", ""
+    except Exception:
+        pass
+    return fallback_snippet, "", ""
 
 
 def register_job(raw_item: dict, seen_in_batch: set, output_list: list[dict]) -> bool:
@@ -608,7 +665,7 @@ def fetch_jobspy_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
     return added
 
 
-# --- SCRAPER 4: SERPAPI GOOGLE X-RAY (PROXY-PROTECTED LINKEDIN, INDEED, DK & NO) ---
+# --- SCRAPER 4: SERPAPI GOOGLE X-RAY (SINGLE-JOB PAGES + FULL DESCRIPTION ENRICHMENT) ---
 def fetch_serpapi_jobs(
     conn: sqlite3.Connection, daily_budget: int, seen_in_batch: set, output_list: list[dict]
 ) -> tuple[int, int]:
@@ -659,6 +716,8 @@ def fetch_serpapi_jobs(
 
                 displayed = res.get("displayed_link") or "Web"
                 company = displayed.split("/")[0]
+                raw_desc = f"Published hint: {res_date}\nSource URL: {link}\nSnippet: {snippet}"
+
                 ok = register_job(
                     {
                         "source": "SerpApi X-Ray",
@@ -667,7 +726,7 @@ def fetch_serpapi_jobs(
                         "location": q_cfg["location"],
                         "posted_date": res_date,
                         "deadline_date": "",
-                        "description": f"Published hint: {res_date}\nSource URL: {link}\nSnippet: {snippet}",
+                        "description": raw_desc,
                         "apply_url": link,
                     },
                     seen_in_batch,
@@ -675,12 +734,25 @@ def fetch_serpapi_jobs(
                 )
                 if ok:
                     added += 1
+                    item = output_list[-1]
+                    # Only enrich if not already in seen_jobs.db
+                    exists = conn.execute(
+                        "SELECT 1 FROM seen_jobs WHERE job_hash = ?", (item["hash"],)
+                    ).fetchone()
+                    if not exists:
+                        full_desc, json_posted, json_deadline = enrich_xray_page(link, raw_desc)
+                        item["description"] = full_desc[:2800]
+                        if json_posted and not item["posted_date"]:
+                            item["posted_date"] = json_posted
+                        if json_deadline and not item["deadline_date"]:
+                            item["deadline_date"] = json_deadline
+                        time.sleep(0.8)
         except Exception as e:
             print(f"[SerpApi] Error for query: {e}", flush=True)
     return added, used
 
 
-# --- BATCH EVALUATE WITH QUOTA-AWARE FALLBACK ---
+# --- BATCH EVALUATE WITH QUOTA-AWARE FALLBACK & EXPONENTIAL 503 BACKOFF ---
 def evaluate_batch(
     client: genai.Client, batch: list[dict], skip_primary: bool
 ) -> tuple[list[JobEvaluation], bool]:
@@ -706,6 +778,7 @@ def evaluate_batch(
         if skip_primary
         else ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.5-flash-lite"]
     )
+    backoff_seconds = [10, 20, 35]
 
     for attempt, model_name in enumerate(models_to_try):
         try:
@@ -728,7 +801,7 @@ def evaluate_batch(
             print(f"Attempt {attempt + 1} ({model_name}) failed: {err_str[:140]}", flush=True)
             if model_name == "gemini-3.8-flash" and "RESOURCE_EXHAUSTED" in err_str:
                 skip_primary = True
-            time.sleep(8)
+            time.sleep(backoff_seconds[min(attempt, len(backoff_seconds) - 1)])
     return [], skip_primary
 
 

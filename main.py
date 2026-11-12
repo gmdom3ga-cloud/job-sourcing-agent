@@ -1,4 +1,6 @@
 import os
+import json
+import re
 import calendar
 import sqlite3
 import hashlib
@@ -98,10 +100,10 @@ class JobEvaluation(BaseModel):
     job_title: str
     company: str
     location: str
-    work_model: Literal["On-site", "Hybrid", "Remote", "Not specified"]
-    language_required: str
-    matching_skills: List[str]
-    gaps_or_requirements: List[str]
+    work_model: Literal["On-site", "Hybrid", "Remote", "Not specified"] = "Not specified"
+    language_required: str = "Not specified"
+    matching_skills: List[str] = []
+    gaps_or_requirements: List[str] = []
     overall_score: int
     fit_verdict: Literal["APPLY", "CONSIDER", "SKIP"]
     match_rationale: str
@@ -326,7 +328,14 @@ def fetch_serpapi_jobs(conn: sqlite3.Connection, daily_budget: int, seen_in_batc
     return jobs, used
 
 
-# --- BATCH EVALUATE & NOTIFY ---
+# --- BATCH EVALUATE WITH GEMMA-3-27B FALLBACK ---
+def parse_gemma_json(raw_text: str) -> list[JobEvaluation]:
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text.strip(), flags=re.MULTILINE)
+    data = json.loads(cleaned)
+    items = data.get("evaluations", data) if isinstance(data, dict) else data
+    return [JobEvaluation(**item) for item in items]
+
+
 def evaluate_batch(client: genai.Client, batch: list[dict], skip_primary: bool) -> tuple[list[JobEvaluation], bool]:
     blocks = []
     for idx, job in enumerate(batch):
@@ -342,33 +351,52 @@ def evaluate_batch(client: genai.Client, batch: list[dict], skip_primary: bool) 
     prompt_text = "\n\n".join(blocks)
 
     models_to_try = (
-        ["gemini-3.5-flash-lite", "gemini-3.5-flash-lite"]
+        ["gemini-3.5-flash-lite", "gemma-3-27b-it"]
         if skip_primary
-        else ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.5-flash-lite"]
+        else ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemma-3-27b-it"]
     )
 
     for attempt, model_name in enumerate(models_to_try):
         try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt_text,
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT,
-                    response_mime_type="application/json",
-                    response_schema=BatchEvaluation,
-                    temperature=0.2,
-                ),
-            )
-            if response.parsed and response.parsed.evaluations:
-                count = len(response.parsed.evaluations)
-                print(f"Batch evaluated ({count} jobs) via {model_name}", flush=True)
-                return response.parsed.evaluations, skip_primary
+            if model_name.startswith("gemma"):
+                gemma_prompt = (
+                    f"{SYSTEM_PROMPT}\n\n"
+                    'Respond ONLY with valid JSON matching: {"evaluations": [{"job_index": 0, '
+                    '"job_title": "...", "company": "...", "location": "...", '
+                    '"work_model": "On-site|Hybrid|Remote|Not specified", '
+                    '"language_required": "...", "matching_skills": ["..."], '
+                    '"gaps_or_requirements": ["..."], "overall_score": 7, '
+                    '"fit_verdict": "APPLY|CONSIDER|SKIP", "match_rationale": "..."}]}\n\n'
+                    f"{prompt_text}"
+                )
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=gemma_prompt,
+                    config=types.GenerateContentConfig(temperature=0.2),
+                )
+                evals = parse_gemma_json(response.text or "")
+            else:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt_text,
+                    config=types.GenerateContentConfig(
+                        system_instruction=SYSTEM_PROMPT,
+                        response_mime_type="application/json",
+                        response_schema=BatchEvaluation,
+                        temperature=0.2,
+                    ),
+                )
+                evals = response.parsed.evaluations if response.parsed else []
+
+            if evals:
+                print(f"Batch evaluated ({len(evals)} jobs) via {model_name}", flush=True)
+                return evals, skip_primary
         except Exception as e:
             err_str = str(e)
             print(f"Attempt {attempt + 1} ({model_name}) failed: {err_str[:140]}", flush=True)
             if model_name == "gemini-3.8-flash" and "RESOURCE_EXHAUSTED" in err_str:
                 skip_primary = True
-            time.sleep(5)
+            time.sleep(3)
     return [], skip_primary
 
 
@@ -468,4 +496,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    

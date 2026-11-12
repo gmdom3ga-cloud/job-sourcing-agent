@@ -19,9 +19,9 @@ AF_API_URL = "https://jobsearch.api.jobtechdev.se/search"
 SERPAPI_URL = "https://serpapi.com/search.json"
 BATCH_SIZE = 10
 MAX_JOBS_PER_RUN = 60
-SERPAPI_TEST_RESERVE_RATIO = 0.15  # Reserve 15% of monthly searches for manual testing
+SERPAPI_TEST_RESERVE_RATIO = 0.15
 
-# 1. Unlimited & Free: Arbetsförmedlingen (Platsbanken) - Broad + Specific across Target Regions
+# 1. Unlimited & Free: Arbetsförmedlingen (Platsbanken)
 AF_QUERIES = [
     {"q": "industriell ekonomi", "limit": 20},
     {"q": "maskinteknik", "limit": 20},
@@ -44,16 +44,40 @@ AF_QUERIES = [
     {"q": "verksamhetsutvecklare", "limit": 10},
 ]
 
-# 2. Quota-Paced: SerpApi Queries (Copenhagen, Oslo & Nordic Direct Career Portals)
+# 2. Quota-Paced: SerpApi Queries (Copenhagen, Oslo & Nordic Career Portals)
 SERPAPI_QUERIES = [
-    {"q": 'site:linkedin.com/jobs ("simulation engineer" OR "production engineer" OR "graduate engineer") Copenhagen', "location": "Copenhagen"},
-    {"q": 'site:jobindex.dk ("simulation engineer" OR "production engineer" OR "industrial engineer")', "location": "Copenhagen"},
-    {"q": 'site:linkedin.com/jobs ("simulation engineer" OR "production engineer" OR "graduate engineer") Oslo', "location": "Oslo"},
-    {"q": 'site:finn.no/job ("simuleringsingeniør" OR "produksjonsingeniør" OR "sivilingeniør" OR "graduate") Oslo', "location": "Oslo"},
-    {"q": 'site:teamtailor.com ("simulation engineer" OR "simuleringsingenjör" OR "produktionsingenjör") (Stockholm OR Malmö OR Örebro)', "location": "Sweden"},
-    {"q": 'site:linkedin.com/jobs ("industrial management" OR "industriell ekonomi" OR "operations analyst") (Stockholm OR Malmö OR Copenhagen)', "location": "Nordics"},
-    {"q": 'site:linkedin.com/jobs ("lean engineer" OR "continuous improvement" OR "process engineer") (Stockholm OR Malmö OR Örebro)', "location": "Sweden"},
-    {"q": 'site:linkedin.com/jobs ("mechanical engineer" OR "maskiningenjör") (Örebro OR Stockholm OR Malmö)', "location": "Sweden"},
+    {
+        "q": 'site:linkedin.com/jobs ("simulation engineer" OR "production engineer" OR "graduate engineer") Copenhagen',
+        "location": "Copenhagen",
+    },
+    {
+        "q": 'site:jobindex.dk ("simulation engineer" OR "production engineer" OR "industrial engineer")',
+        "location": "Copenhagen",
+    },
+    {
+        "q": 'site:linkedin.com/jobs ("simulation engineer" OR "production engineer" OR "graduate engineer") Oslo',
+        "location": "Oslo",
+    },
+    {
+        "q": 'site:finn.no/job ("simuleringsingeniør" OR "produksjonsingeniør" OR "sivilingeniør" OR "graduate") Oslo',
+        "location": "Oslo",
+    },
+    {
+        "q": 'site:teamtailor.com ("simulation engineer" OR "simuleringsingenjör" OR "produktionsingenjör") (Stockholm OR Malmö OR Örebro)',
+        "location": "Sweden",
+    },
+    {
+        "q": 'site:linkedin.com/jobs ("industrial management" OR "industriell ekonomi" OR "operations analyst") (Stockholm OR Malmö OR Copenhagen)',
+        "location": "Nordics",
+    },
+    {
+        "q": 'site:linkedin.com/jobs ("lean engineer" OR "continuous improvement" OR "process engineer") (Stockholm OR Malmö OR Örebro)',
+        "location": "Sweden",
+    },
+    {
+        "q": 'site:linkedin.com/jobs ("mechanical engineer" OR "maskiningenjör") (Örebro OR Stockholm OR Malmö)',
+        "location": "Sweden",
+    },
 ]
 
 EXCLUDED_TITLE_KEYWORDS = [
@@ -197,7 +221,10 @@ def get_serpapi_budget() -> tuple[int, str]:
         else:
             daily_budget = max(1, spendable // days_left)
 
-        status = f"{left}/{total} left (15% test reserve: {reserve}, today's auto-budget: {daily_budget})"
+        status = (
+            f"{left}/{total} left "
+            f"(15% test reserve: {reserve}, today's auto-budget: {daily_budget})"
+        )
         return daily_budget, status
     except Exception as e:
         print(f"SerpApi quota check error: {e}", flush=True)
@@ -254,7 +281,9 @@ def fetch_af_jobs(seen_in_batch: set) -> list[dict]:
     return jobs
 
 
-def fetch_serpapi_jobs(conn: sqlite3.Connection, daily_budget: int, seen_in_batch: set) -> tuple[list[dict], int]:
+def fetch_serpapi_jobs(
+    conn: sqlite3.Connection, daily_budget: int, seen_in_batch: set
+) -> tuple[list[dict], int]:
     if daily_budget <= 0 or not SERPAPI_KEY:
         print(f"[SerpApi] Skipping automated search (daily_budget={daily_budget}).", flush=True)
         return [], 0
@@ -269,6 +298,215 @@ def fetch_serpapi_jobs(conn: sqlite3.Connection, daily_budget: int, seen_in_batc
     ]
 
     new_cursor = (cursor + num_queries) % len(SERPAPI_QUERIES)
-    conn.execute(
-        "INSERT OR REPLACE INTO meta_state (key, value
-    
+    sql_upsert = (
+        "INSERT OR REPLACE INTO meta_state (key, value) "
+        "VALUES ('serpapi_cursor', ?)"
+    )
+    conn.execute(sql_upsert, (new_cursor,))
+    conn.commit()
+
+    jobs = []
+    used = 0
+    for q_cfg in selected_queries:
+        params = {
+            "engine": "google",
+            "q": q_cfg["q"],
+            "tbs": "qdr:w",
+            "num": 10,
+            "api_key": SERPAPI_KEY,
+        }
+        try:
+            resp = requests.get(SERPAPI_URL, params=params, timeout=20)
+            resp.raise_for_status()
+            used += 1
+            results = resp.json().get("organic_results") or []
+            print(f"[SerpApi] '{q_cfg['q'][:45]}...': {len(results)} results", flush=True)
+            for res in results:
+                title = res.get("title") or ""
+                snippet = res.get("snippet") or ""
+                link = res.get("link") or ""
+                if not title or not link:
+                    continue
+
+                title_lower = title.lower()
+                if any(bad in title_lower for bad in EXCLUDED_TITLE_KEYWORDS):
+                    continue
+
+                displayed = res.get("displayed_link") or "Web"
+                company = displayed.split("/")[0]
+                location = q_cfg["location"]
+                j_hash = get_job_hash(title, company, location)
+                if j_hash in seen_in_batch:
+                    continue
+                seen_in_batch.add(j_hash)
+
+                jobs.append(
+                    {
+                        "hash": j_hash,
+                        "source": "SerpApi",
+                        "title": title,
+                        "company_name": company,
+                        "location": location,
+                        "description": f"Source URL: {link}\nSnippet: {snippet}"[:2800],
+                        "apply_url": link,
+                    }
+                )
+        except Exception as e:
+            print(f"[SerpApi] Error for query: {e}", flush=True)
+    return jobs, used
+
+
+# --- BATCH EVALUATE WITH QUOTA-AWARE FALLBACK ---
+def evaluate_batch(
+    client: genai.Client, batch: list[dict], skip_primary: bool
+) -> tuple[list[JobEvaluation], bool]:
+    blocks = []
+    for idx, job in enumerate(batch):
+        block = (
+            f"=== JOB_INDEX: {idx} ===\n"
+            f"Source: {job.get('source')}\n"
+            f"Title: {job.get('title')}\n"
+            f"Company: {job.get('company_name')}\n"
+            f"Location: {job.get('location')}\n"
+            f"Description:\n{job.get('description', '')}"
+        )
+        blocks.append(block)
+    prompt_text = "\n\n".join(blocks)
+
+    models_to_try = (
+        ["gemini-3.5-flash-lite", "gemini-3.5-flash-lite", "gemini-3.5-flash-lite"]
+        if skip_primary
+        else ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.5-flash-lite"]
+    )
+
+    for attempt, model_name in enumerate(models_to_try):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt_text,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    response_mime_type="application/json",
+                    response_schema=BatchEvaluation,
+                    temperature=0.2,
+                ),
+            )
+            evals = response.parsed.evaluations if response.parsed else []
+            if evals:
+                print(f"Batch evaluated ({len(evals)} jobs) via {model_name}", flush=True)
+                return evals, skip_primary
+        except Exception as e:
+            err_str = str(e)
+            print(f"Attempt {attempt + 1} ({model_name}) failed: {err_str[:140]}", flush=True)
+            if model_name == "gemini-3.8-flash" and "RESOURCE_EXHAUSTED" in err_str:
+                skip_primary = True
+            time.sleep(8)
+    return [], skip_primary
+
+
+def send_discord_embed(eval_data: JobEvaluation, apply_url: str, quota_text: str, run_date: str):
+    color = 0x2ECC71 if eval_data.overall_score >= 9 else 0xF1C40F
+    badge = "🟢" if eval_data.overall_score >= 9 else "🟡"
+
+    skills_list = eval_data.matching_skills[:4]
+    skills_text = " • ".join([f"✅ {s}" for s in skills_list]) if skills_list else "Engineering Core"
+
+    gaps_list = [g for g in eval_data.gaps_or_requirements[:2] if g.lower() != "none"]
+    gaps_text = " • ".join([f"⚠️ {g}" for g in gaps_list]) if gaps_list else "None"
+
+    embed = {
+        "title": f"{badge} {eval_data.overall_score}/10 — {eval_data.job_title} ({eval_data.company})",
+        "url": apply_url,
+        "description": f"*{eval_data.match_rationale}*",
+        "color": color,
+        "footer": {"text": f"Searched: {run_date} • SerpApi: {quota_text}"},
+        "fields": [
+            {"name": "📍 Location", "value": eval_data.location, "inline": True},
+            {"name": "🏢 Model", "value": eval_data.work_model, "inline": True},
+            {"name": "🗣️ Language", "value": eval_data.language_required, "inline": True},
+            {"name": "🛠️ Key Matches", "value": skills_text[:1024], "inline": False},
+            {"name": "📋 Watchouts / Req", "value": gaps_text[:1024], "inline": False},
+        ],
+    }
+
+    resp = requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]}, timeout=15)
+    if resp.status_code not in (200, 204):
+        print(f"Discord webhook error {resp.status_code}: {resp.text}", flush=True)
+    time.sleep(1.5)
+
+
+def main():
+    conn = init_db()
+    run_date = get_swedish_timestamp()
+    client = genai.Client(api_key=GEMINI_API_KEY, http_options={"timeout": 60000})
+
+    daily_budget, budget_status = get_serpapi_budget()
+    print(f"[{run_date}] SerpApi budget check -> {budget_status}", flush=True)
+
+    seen_in_batch = set()
+    af_jobs = fetch_af_jobs(seen_in_batch)
+    serp_jobs, serp_used = fetch_serpapi_jobs(conn, daily_budget, seen_in_batch)
+    raw_jobs = af_jobs + serp_jobs
+    print(
+        f"Total unique fetched: {len(raw_jobs)} (AF: {len(af_jobs)}, SerpApi: {len(serp_jobs)})",
+        flush=True,
+    )
+
+    all_unseen = [
+        job
+        for job in raw_jobs
+        if not conn.execute("SELECT 1 FROM seen_jobs WHERE job_hash = ?", (job["hash"],)).fetchone()
+    ]
+    unseen_jobs = all_unseen[:MAX_JOBS_PER_RUN]
+    print(
+        f"Unseen jobs total: {len(all_unseen)} (evaluating up to {len(unseen_jobs)} this run)",
+        flush=True,
+    )
+
+    matches = []
+    evaluated_count = 0
+    skip_primary = False
+
+    for i in range(0, len(unseen_jobs), BATCH_SIZE):
+        batch = unseen_jobs[i : i + BATCH_SIZE]
+        evaluations, skip_primary = evaluate_batch(client, batch, skip_primary)
+        for ev in evaluations:
+            if 0 <= ev.job_index < len(batch):
+                job = batch[ev.job_index]
+                evaluated_count += 1
+                print(
+                    f"[{evaluated_count}] [{job['source']}] {job['title']} -> "
+                    f"{ev.overall_score}/10 ({ev.fit_verdict})",
+                    flush=True,
+                )
+                sql_insert = (
+                    "INSERT OR IGNORE INTO seen_jobs (job_hash, title, company, score) "
+                    "VALUES (?, ?, ?, ?)"
+                )
+                conn.execute(
+                    sql_insert,
+                    (job["hash"], job["title"], job["company_name"], ev.overall_score),
+                )
+                conn.commit()
+
+                if ev.fit_verdict != "SKIP" and ev.overall_score >= 7:
+                    default_url = "https://arbetsformedlingen.se/platsbanken"
+                    matches.append((ev, job.get("apply_url", default_url)))
+        time.sleep(3)
+
+    _, updated_quota_status = get_serpapi_budget()
+    matches.sort(key=lambda x: x[0].overall_score, reverse=True)
+    for eval_data, url in matches[:20]:
+        send_discord_embed(eval_data, url, updated_quota_status, run_date)
+
+    summary_text = (
+        f"📊 **Daily Job Scout ({run_date}):** Evaluated **{evaluated_count}** new jobs "
+        f"(AF: {len(af_jobs)}, SerpApi: {len(serp_jobs)}) • Found **{len(matches)}** matches (7+) • "
+        f"SerpApi: **{updated_quota_status}** (used {serp_used} today)"
+    )
+    requests.post(DISCORD_WEBHOOK_URL, json={"content": summary_text}, timeout=15)
+    print(f"Done. Sent {min(len(matches), 20)} matching jobs to Discord.", flush=True)
+
+
+if __name__ == "__main__":
+    main()

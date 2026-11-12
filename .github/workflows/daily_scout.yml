@@ -1,0 +1,40 @@
+name: Daily Job Scout
+
+on:
+  schedule:
+    - cron: '0 6 * * *' # Runs daily at 06:00 UTC (07:00 CET)
+  workflow_dispatch:     # Lets you trigger a manual test run anytime from your phone
+
+permissions:
+  contents: write
+
+jobs:
+  scout:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Job Sourcing Agent
+        env:
+          SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python main.py
+
+      - name: Save seen jobs database
+        run: |
+          git config user.name "Job Scout Bot"
+          git config user.email "actions@github.com"
+          git add seen_jobs.db
+          git diff --staged --quiet || git commit -m "chore: update seen_jobs.db"
+          git push
+          

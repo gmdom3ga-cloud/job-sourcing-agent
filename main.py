@@ -15,8 +15,8 @@ DISCORD_WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
 SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "")
 DB_PATH = "seen_jobs.db"
 AF_API_URL = "https://jobsearch.api.jobtechdev.se/search"
-BATCH_SIZE = 6
-GEMINI_MODELS = ["gemini-3.8-flash", "gemini-flash-latest", "gemini-3.8-flash"]
+BATCH_SIZE = 3
+MAX_RETRIES = 3
 
 STOCKHOLM_QUERIES = [
     {"q": "simuleringsingenjör Stockholm", "limit": 15},
@@ -88,7 +88,7 @@ class BatchEvaluation(BaseModel):
 
 
 SYSTEM_PROMPT = """
-You are an expert technical recruiter and talent evaluator in Scandinavia. You will receive a numbered batch of job descriptions. Evaluate EVERY job in the batch independently against the candidate's profile, preserve its exact `job_index`, break down requirements, rate fit, and assign an overall relevance score (1-10).
+You are an expert technical recruiter and talent evaluator in Scandinavia. You will receive a numbered batch of job descriptions. Evaluate EVERY job in the batch independently against the candidate's profile, preserve its exact `job_index`, break down requirements, rate fit, and assign an overall relevance score (1-10). Keep all text fields concise (1-2 short sentences max).
 
 ### CANDIDATE PROFILE:
 - Name: Matin Ahmadi
@@ -196,7 +196,7 @@ def fetch_jobs():
                         "title": title,
                         "company_name": company,
                         "location": location,
-                        "description": desc_text[:3200],
+                        "description": desc_text[:1800],
                         "apply_url": apply_url,
                         "employment_type": emp_type,
                     }
@@ -220,10 +220,10 @@ def evaluate_batch(client: genai.Client, batch: list[dict]) -> list[JobEvaluatio
         blocks.append(block)
     prompt_text = "\n\n".join(blocks)
 
-    for attempt, model_name in enumerate(GEMINI_MODELS):
+    for attempt in range(MAX_RETRIES):
         try:
             response = client.models.generate_content(
-                model=model_name,
+                model="gemini-3.8-flash",
                 contents=prompt_text,
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_PROMPT,
@@ -234,11 +234,13 @@ def evaluate_batch(client: genai.Client, batch: list[dict]) -> list[JobEvaluatio
             )
             if response.parsed and response.parsed.evaluations:
                 count = len(response.parsed.evaluations)
-                print(f"Batch evaluated ({count} jobs) via {model_name}", flush=True)
+                print(f"Batch evaluated ({count} jobs) via gemini-3.8-flash", flush=True)
                 return response.parsed.evaluations
         except Exception as e:
-            print(f"Attempt {attempt + 1} ({model_name}) failed: {e}", flush=True)
-            time.sleep(5)
+            print(f"Attempt {attempt + 1} failed: {e}", flush=True)
+            if "RESOURCE_EXHAUSTED" in str(e) and "limit: 20" in str(e):
+                break
+            time.sleep(8)
     return []
 
 
@@ -339,7 +341,7 @@ def main():
                 if ev.fit_verdict != "SKIP" and ev.overall_score >= 7:
                     default_url = "https://arbetsformedlingen.se/platsbanken"
                     matches.append((ev, job.get("apply_url", default_url)))
-        time.sleep(2)
+        time.sleep(3)
 
     quota_text = get_serpapi_quota()
     matches.sort(key=lambda x: x[0].overall_score, reverse=True)

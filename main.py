@@ -2,7 +2,6 @@ import os
 import sqlite3
 import hashlib
 import time
-from datetime import datetime
 from typing import Literal, List
 import requests
 from pydantic import BaseModel
@@ -10,25 +9,17 @@ from google import genai
 from google.genai import types
 
 # --- CONFIGURATION ---
-SERPAPI_KEY = os.environ["SERPAPI_KEY"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 DISCORD_WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
 DB_PATH = "seen_jobs.db"
+AF_API_URL = "https://jobsearch.api.jobtechdev.se/search"
 
-# Rotating daily queries (4 searches/day = ~120/month)
-# Note: 'gl' is omitted because google_jobs does not support 'se'
-EVEN_DAY_QUERIES = [
-    {"q": "produktionsingenjör", "location": "Stockholm, Sweden", "hl": "sv"},
-    {"q": "ingenjör", "location": "Örebro, Sweden", "hl": "sv"},
-    {"q": "produktionsingenjör", "location": "Malmö, Sweden", "hl": "sv"},
-    {"q": "simulation engineer", "location": "Copenhagen, Denmark", "hl": "en"},
-]
-
-ODD_DAY_QUERIES = [
-    {"q": "simulation engineer", "location": "Stockholm, Sweden", "hl": "en"},
-    {"q": "engineer", "location": "Örebro, Sweden", "hl": "en"},
-    {"q": "production engineer", "location": "Copenhagen, Denmark", "hl": "en"},
-    {"q": "simulation engineer", "location": "Oslo, Norway", "hl": "en"},
+# Targeted Stockholm queries on Arbetsförmedlingen (Platsbanken)
+STOCKHOLM_QUERIES = [
+    {"q": "simuleringsingenjör Stockholm", "limit": 15},
+    {"q": "produktionsingenjör Stockholm", "limit": 15},
+    {"q": "simulation engineer Stockholm", "limit": 15},
+    {"q": "production engineer Stockholm", "limit": 15},
 ]
 
 # --- PYDANTIC SCHEMA FOR STRUCTURED OUTPUT ---
@@ -108,27 +99,31 @@ def get_job_hash(title: str, company: str, location: str) -> str:
 
 # --- FETCH, EVALUATE & NOTIFY ---
 def fetch_jobs():
-    queries = EVEN_DAY_QUERIES if datetime.utcnow().day % 2 == 0 else ODD_DAY_QUERIES
     all_jobs = []
-    for q_cfg in queries:
+    headers = {"Accept": "application/json"}
+    for q_cfg in STOCKHOLM_QUERIES:
         params = {
-            "engine": "google_jobs",
             "q": q_cfg["q"],
-            "location": q_cfg["location"],
-            "hl": q_cfg["hl"],
-            "api_key": SERPAPI_KEY,
+            "limit": q_cfg["limit"],
+            "sort": "pubdate-desc",
         }
         try:
-            resp = requests.get("https://serpapi.com/search", params=params, timeout=30)
+            resp = requests.get(AF_API_URL, params=params, headers=headers, timeout=30)
+            resp.raise_for_status()
             data = resp.json()
-            if "error" in data:
-                print(f"SerpApi error for {q_cfg['location']}: {data['error']}")
-                continue
-            results = data.get("jobs_results", [])
-            print(f"{q_cfg['location']} ({q_cfg['q']}): found {len(results)} jobs")
-            all_jobs.extend(results)
+            hits = data.get("hits", [])
+            print(f"Query '{q_cfg['q']}': found {len(hits)} jobs")
+            for hit in hits:
+                all_jobs.append({
+                    "title": hit.get("headline", ""),
+                    "company_name": (hit.get("employer") or {}).get("name", "Unknown"),
+                    "location": (hit.get("workplace_address") or {}).get("municipality", "Stockholm"),
+                    "description": (hit.get("description") or {}).get("text", ""),
+                    "apply_url": hit.get("webpage_url", "https://arbetsformedlingen.se/platsbanken"),
+                    "employment_type": (hit.get("working_hours_type") or {}).get("label", ""),
+                })
         except Exception as e:
-            print(f"Search exception for {q_cfg['location']}: {e}")
+            print(f"Arbetsförmedlingen search error for '{q_cfg['q']}': {e}")
     return all_jobs
 
 def evaluate_job(client: genai.Client, job: dict) -> JobEvaluation | None:
@@ -136,7 +131,7 @@ def evaluate_job(client: genai.Client, job: dict) -> JobEvaluation | None:
         f"Title: {job.get('title')}\n"
         f"Company: {job.get('company_name')}\n"
         f"Location: {job.get('location')}\n"
-        f"Detected Extensions: {job.get('detected_extensions')}\n"
+        f"Employment Type: {job.get('employment_type')}\n"
         f"Description:\n{job.get('description', '')}"
     )
     try:
@@ -152,7 +147,7 @@ def evaluate_job(client: genai.Client, job: dict) -> JobEvaluation | None:
         )
         return response.parsed
     except Exception as e:
-        print(f"Gemini evaluation error: {e}")
+        print(f"Gemini evaluation error for '{job.get('title')}': {e}")
         return None
 
 def format_skills(skills: list[SkillItem], limit: int = 5) -> str:
@@ -245,9 +240,7 @@ def main():
         conn.commit()
 
         if evaluation.fit_verdict != "SKIP" and evaluation.overall_score >= 7:
-            apply_options = job.get("apply_options", [])
-            apply_url = apply_options[0].get("link") if apply_options else job.get("share_link", "https://www.google.com")
-            matches.append((evaluation, apply_url))
+            matches.append((evaluation, job.get("apply_url", "https://arbetsformedlingen.se/platsbanken")))
 
     matches.sort(key=lambda x: x[0].overall_score, reverse=True)
     for eval_data, url in matches[:20]:

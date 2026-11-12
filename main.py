@@ -16,18 +16,19 @@ DISCORD_WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
 DB_PATH = "seen_jobs.db"
 
 # Rotating daily queries (4 searches/day = ~120/month)
+# Note: 'gl' is omitted because google_jobs does not support 'se'
 EVEN_DAY_QUERIES = [
-    {"q": "produktionsingenjör OR simuleringsingenjör OR logistikingenjör", "location": "Stockholm, Sweden", "gl": "se", "hl": "sv"},
-    {"q": "produktionsingenjör OR simuleringsingenjör OR civilingenjör", "location": "Örebro, Sweden", "gl": "se", "hl": "sv"},
-    {"q": "produktionsingenjör OR logistikingenjör OR supply chain", "location": "Malmö, Sweden", "gl": "se", "hl": "sv"},
-    {"q": "simulation engineer OR production engineer OR graduate engineer", "location": "Copenhagen, Denmark", "gl": "dk", "hl": "en"},
+    {"q": "produktionsingenjör", "location": "Stockholm, Sweden", "hl": "sv"},
+    {"q": "ingenjör", "location": "Örebro, Sweden", "hl": "sv"},
+    {"q": "produktionsingenjör", "location": "Malmö, Sweden", "hl": "sv"},
+    {"q": "simulation engineer", "location": "Copenhagen, Denmark", "hl": "en"},
 ]
 
 ODD_DAY_QUERIES = [
-    {"q": "simulation engineer OR production engineer OR supply chain", "location": "Stockholm, Sweden", "gl": "se", "hl": "en"},
-    {"q": "simulation engineer OR mechanical engineer OR production engineer", "location": "Örebro, Sweden", "gl": "se", "hl": "en"},
-    {"q": "production engineer OR continuous improvement OR logistics engineer", "location": "Copenhagen, Denmark", "gl": "dk", "hl": "en"},
-    {"q": "simulation engineer OR systems engineer OR digital twin", "location": "Oslo, Norway", "gl": "no", "hl": "en"},
+    {"q": "simulation engineer", "location": "Stockholm, Sweden", "hl": "en"},
+    {"q": "engineer", "location": "Örebro, Sweden", "hl": "en"},
+    {"q": "production engineer", "location": "Copenhagen, Denmark", "hl": "en"},
+    {"q": "simulation engineer", "location": "Oslo, Norway", "hl": "en"},
 ]
 
 # --- PYDANTIC SCHEMA FOR STRUCTURED OUTPUT ---
@@ -114,7 +115,6 @@ def fetch_jobs():
             "engine": "google_jobs",
             "q": q_cfg["q"],
             "location": q_cfg["location"],
-            "gl": q_cfg["gl"],
             "hl": q_cfg["hl"],
             "api_key": SERPAPI_KEY,
         }
@@ -125,7 +125,7 @@ def fetch_jobs():
                 print(f"SerpApi error for {q_cfg['location']}: {data['error']}")
                 continue
             results = data.get("jobs_results", [])
-            print(f"{q_cfg['location']}: found {len(results)} jobs")
+            print(f"{q_cfg['location']} ({q_cfg['q']}): found {len(results)} jobs")
             all_jobs.extend(results)
         except Exception as e:
             print(f"Search exception for {q_cfg['location']}: {e}")
@@ -257,3 +257,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    

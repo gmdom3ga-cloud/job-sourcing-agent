@@ -217,11 +217,20 @@ def format_skills(skills: list[SkillItem], limit: int = 5) -> str:
 def send_discord_embed(eval_data: JobEvaluation, apply_url: str, quota_text: str, run_date: str):
     color = 0x2ECC71 if eval_data.overall_score >= 9 else 0xF1C40F
     badge = "🟢" if eval_data.overall_score >= 9 else "🟡"
+    rb = eval_data.requirements_breakdown
 
-    proven_traits = [t for t in eval_data.requirements_breakdown.personal_traits if t.proven_record_required]
-    traits_text = " • ".join([f"{'✅' if t.fit_rating == 'Strong' else '⚠️'} {t.trait}" for t in proven_traits]) if proven_traits else "No proven track record required"
+    proven_traits = [t for t in rb.personal_traits if t.proven_record_required]
+    if proven_traits:
+        traits_text = " • ".join([f"{'✅' if t.fit_rating == 'Strong' else '⚠️'} {t.trait}" for t in proven_traits])
+    else:
+        traits_text = "No proven track record required"
 
-    edu_val = f"• **Edu:** {eval_data.requirements_breakdown.education.fit_rating} ({eval_data.requirements_breakdown.education.required})\n• **Exp:** {eval_data.requirements_breakdown.experience.fit_rating} ({eval_data.requirements_breakdown.experience.required})"
+    edu_line = f"• **Edu:** {rb.education.fit_rating} ({rb.education.required})"
+    exp_line = f"• **Exp:** {rb.experience.fit_rating} ({rb.experience.required})"
+    edu_val = f"{edu_line}\n{exp_line}"
+
+    mand_val = format_skills(rb.skills_mandatory)[:1024]
+    merit_val = format_skills(rb.skills_meritorious)[:1024]
 
     embed = {
         "title": f"{badge} {eval_data.overall_score}/10 — {eval_data.job_title} ({eval_data.company})",
@@ -236,6 +245,62 @@ def send_discord_embed(eval_data: JobEvaluation, apply_url: str, quota_text: str
             {"name": "👥 Applicants", "value": eval_data.amount_of_applicants, "inline": True},
             {"name": "🗺️ Region Tier", "value": eval_data.region_tier, "inline": True},
             {"name": "🎓 Education & Experience", "value": edu_val[:1024], "inline": False},
-            {"name": "🛠️ Mandatory Skills (Top 5)", "value": format_skills(eval_data.requirements_breakdown.skills_mandatory)[:1024], "inline": False},
-            {"name": "⭐ Meritorious Skills (Top 5)", "value": format_skills(eval
+            {"name": "🛠️ Mandatory Skills (Top 5)", "value": mand_val, "inline": False},
+            {"name": "⭐ Meritorious Skills (Top 5)", "value": merit_val, "inline": False},
+            {"name": "🤝 Proven Personal Traits", "value": traits_text[:1024], "inline": False},
+        ],
+    }
+
+    resp = requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]}, timeout=15)
+    if resp.status_code not in (200, 204):
+        print(f"Discord webhook error {resp.status_code}: {resp.text}", flush=True)
+    time.sleep(1.5)
+
+def main():
+    conn = init_db()
+    run_date = get_swedish_timestamp()
+    client = genai.Client(api_key=GEMINI_API_KEY, http_options={"timeout": 60000})
+    raw_jobs = fetch_jobs()
+    print(f"[{run_date}] Fetched {len(raw_jobs)} filtered unique jobs.", flush=True)
+
+    unseen_jobs = [
+        job for job in raw_jobs
+        if not conn.execute("SELECT 1 FROM seen_jobs WHERE job_hash = ?", (job["hash"],)).fetchone()
+    ]
+    print(f"Unseen jobs to evaluate: {len(unseen_jobs)}", flush=True)
+
+    matches = []
+    evaluated_count = 0
+
+    for i in range(0, len(unseen_jobs), BATCH_SIZE):
+        batch = unseen_jobs[i : i + BATCH_SIZE]
+        evaluations = evaluate_batch(client, batch)
+        for ev in evaluations:
+            if 0 <= ev.job_index < len(batch):
+                job = batch[ev.job_index]
+                evaluated_count += 1
+                print(f"[{evaluated_count}] {job['title']} -> {ev.overall_score}/10 ({ev.fit_verdict})", flush=True)
+                conn.execute(
+                    "INSERT OR IGNORE INTO seen_jobs (job_hash, title, company, score) VALUES (?, ?, ?, ?)",
+                    (job["hash"], job["title"], job["company_name"], ev.overall_score),
+                )
+                conn.commit()
+
+                if ev.fit_verdict != "SKIP" and ev.overall_score >= 7:
+                    matches.append((ev, job.get("apply_url", "https://arbetsformedlingen.se/platsbanken")))
+        time.sleep(2)
+
+    quota_text = get_serpapi_quota()
+    matches.sort(key=lambda x: x[0].overall_score, reverse=True)
+    for eval_data, url in matches[:20]:
+        send_discord_embed(eval_data, url, quota_text, run_date)
+
+    summary_payload = {
+        "content": f"📊 **Daily Job Scout ({run_date}):** Evaluated **{evaluated_count}** new jobs • Found **{len(matches)}** matches (7+) • SerpApi: **{quota_text}**"
+    }
+    requests.post(DISCORD_WEBHOOK_URL, json=summary_payload, timeout=15)
+    print(f"Done. Sent {min(len(matches), 20)} matching jobs to Discord.", flush=True)
+
+if __name__ == "__main__":
+    main()
     

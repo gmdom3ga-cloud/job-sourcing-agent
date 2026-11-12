@@ -7,7 +7,8 @@ import sqlite3
 import hashlib
 import time
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone, timedelta
+from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone, timedelta, date
 from typing import Literal, List
 import requests
 from pydantic import BaseModel
@@ -199,7 +200,6 @@ EXCLUDED_TITLE_KEYWORDS = [
     "redovisningsekonom",
 ]
 
-
 ALLOWED_LOCATIONS = [
     "stockholm",
     "solna",
@@ -243,6 +243,8 @@ class JobEvaluation(BaseModel):
     location: str
     work_model: Literal["On-site", "Hybrid", "Remote", "Not specified"] = "Not specified"
     language_required: str = "Not specified"
+    posted_date_iso: str = ""
+    deadline_date_iso: str = ""
     matching_skills: List[str] = []
     gaps_or_requirements: List[str] = []
     overall_score: int
@@ -261,6 +263,8 @@ You are an expert technical recruiter in Scandinavia. Evaluate EVERY numbered jo
 - `match_rationale`: 3 to 4 ultra-short keyword phrases separated by ` • ` (NO full sentences, e.g. "Dual M.Sc. IEM & Mech • Plant Simulation Fit • Entry-Level • Stockholm").
 - `matching_skills`: Max 4 short keyword tags (2-4 words each).
 - `gaps_or_requirements`: Max 2 short keyword tags (e.g. "2+ yrs exp", "Swedish C1", or ["None"]).
+- `posted_date_iso`: Extract publication date in `YYYY-MM-DD` format from metadata or description if present, else `""`.
+- `deadline_date_iso`: Extract application deadline ("sista ansökningsdag" / "apply by") in `YYYY-MM-DD` format from metadata or description if present, else `""`.
 
 ### CANDIDATE PROFILE:
 - Name: Matin Ahmadi
@@ -279,6 +283,7 @@ You are an expert technical recruiter in Scandinavia. Evaluate EVERY numbered jo
   1. Defense, weapons, armament, or military industry.
   2. Civil engineering, building construction (byggnadsingenjör / konstruktion / VVS / anläggning), or real estate construction.
   3. Pure software development, web/app/cloud/IT engineering (software engineer / systemutvecklare). Note: Physical/industrial simulation, digital twins, HIL, and MATLAB/C++ modeling ARE relevant and should NOT be excluded.
+  4. Pure wet-lab chemistry, analytical biochemistry, microbiology, or R&D molecular biology (biokemist / kemist / labbingenjör / mikrobiolog). Note: Pharmaceutical manufacturing, process engineering, medical device assembly, Lean/operations, and discrete-event simulation at pharma companies (e.g., AstraZeneca) ARE highly relevant and should be scored high.
 - Primary Regions: Malmö, Örebro, Stockholm, and ~1h commute (Lund, Copenhagen, Södertälje, Karlskoga, Eskilstuna, Västerås, Helsingborg). Roles in other Swedish cities (e.g. Gothenburg) should be scored <= 5 (`fit_verdict`: "SKIP") unless remote/hybrid from target regions.
 - Oslo Exception: Roles in Oslo are eligible ONLY if `overall_score` is 9 or 10; otherwise set `fit_verdict` to "SKIP".
 - 9-10: Graduate/entry-level/trainee (0-2 yrs exp) matching IEM or Mechanical Engineering, simulation, Lean, or operations in target regions.
@@ -287,7 +292,7 @@ You are an expert technical recruiter in Scandinavia. Evaluate EVERY numbered jo
 """
 
 
-# --- DATABASE, NORMALIZATION & FILTER HELPERS ---
+# --- DATABASE, DATE, NORMALIZATION & FILTER HELPERS ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
@@ -300,6 +305,73 @@ def init_db():
     )
     conn.commit()
     return conn
+
+
+def get_swedish_now() -> datetime:
+    cet = timezone(timedelta(hours=1))
+    return datetime.now(cet)
+
+
+def get_swedish_timestamp() -> str:
+    return get_swedish_now().strftime("%Y-%m-%d %H:%M CET")
+
+
+def parse_iso_date(val) -> str:
+    if val is None:
+        return ""
+    if isinstance(val, float) and math.isnan(val):
+        return ""
+    if isinstance(val, datetime):
+        return val.strftime("%Y-%m-%d")
+    if isinstance(val, date):
+        return val.strftime("%Y-%m-%d")
+    s = str(val).strip()
+    if not s or s.lower() in ("none", "nan", "nat"):
+        return ""
+    m = re.search(r"(\d{4}-\d{2}-\d{2})", s)
+    if m:
+        return m.group(1)
+    try:
+        dt = parsedate_to_datetime(s)
+        return dt.strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
+
+def format_posted_badge(iso_str: str, today: date) -> str:
+    parsed = parse_iso_date(iso_str)
+    if not parsed:
+        return "Ej angivet"
+    try:
+        d = datetime.strptime(parsed, "%Y-%m-%d").date()
+        diff = (today - d).days
+        if diff <= 0:
+            rel = "Idag"
+        elif diff == 1:
+            rel = "1d sedan"
+        else:
+            rel = f"{diff}d sedan"
+        return f"{parsed} ({rel})"
+    except Exception:
+        return parsed
+
+
+def format_deadline_badge(iso_str: str, today: date) -> str:
+    parsed = parse_iso_date(iso_str)
+    if not parsed:
+        return "Löpande / Ej angivet"
+    try:
+        d = datetime.strptime(parsed, "%Y-%m-%d").date()
+        diff = (d - today).days
+        if diff < 0:
+            return f"{parsed} (Utgången)"
+        if diff == 0:
+            return f"⚠️ {parsed} (Idag!)"
+        if diff <= 4:
+            return f"⚠️ {parsed} ({diff}d kvar)"
+        return f"{parsed} ({diff}d kvar)"
+    except Exception:
+        return parsed
 
 
 def normalize_token(text: str) -> str:
@@ -362,18 +434,11 @@ def register_job(raw_item: dict, seen_in_batch: set, output_list: list[dict]) ->
     raw_item["title"] = title
     raw_item["company_name"] = company
     raw_item["location"] = display_loc
+    raw_item["posted_date"] = parse_iso_date(raw_item.get("posted_date"))
+    raw_item["deadline_date"] = parse_iso_date(raw_item.get("deadline_date"))
     raw_item["description"] = description[:2800]
     output_list.append(raw_item)
     return True
-
-
-def get_swedish_now() -> datetime:
-    cet = timezone(timedelta(hours=1))
-    return datetime.now(cet)
-
-
-def get_swedish_timestamp() -> str:
-    return get_swedish_now().strftime("%Y-%m-%d %H:%M CET")
 
 
 def get_serpapi_budget() -> tuple[int, str]:
@@ -433,6 +498,8 @@ def fetch_af_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
                         "title": hit.get("headline") or "",
                         "company_name": (hit.get("employer") or {}).get("name") or "Unknown",
                         "location": (hit.get("workplace_address") or {}).get("municipality") or "",
+                        "posted_date": hit.get("publication_date") or "",
+                        "deadline_date": hit.get("application_deadline") or "",
                         "description": (hit.get("description") or {}).get("text") or "",
                         "apply_url": hit.get("webpage_url") or "https://arbetsformedlingen.se/platsbanken",
                     },
@@ -464,6 +531,7 @@ def fetch_teamtailor_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
             for item in items:
                 title = item.findtext("title") or ""
                 link = item.findtext("link") or url.replace("/jobs.rss", "")
+                pub_date = item.findtext("pubDate") or ""
                 desc = strip_html(item.findtext("description") or "")
                 categories = [c.text for c in item.findall("category") if c.text]
                 location = ", ".join(categories) if categories else ""
@@ -474,6 +542,8 @@ def fetch_teamtailor_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
                         "title": title,
                         "company_name": company,
                         "location": location,
+                        "posted_date": pub_date,
+                        "deadline_date": "",
                         "description": desc,
                         "apply_url": link,
                     },
@@ -520,6 +590,8 @@ def fetch_jobspy_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
                             "title": row.get("title"),
                             "company_name": row.get("company"),
                             "location": row.get("location") or q_cfg["location"],
+                            "posted_date": row.get("date_posted"),
+                            "deadline_date": "",
                             "description": row.get("description"),
                             "apply_url": apply_url,
                         },
@@ -581,6 +653,7 @@ def fetch_serpapi_jobs(
                 title = res.get("title") or ""
                 snippet = res.get("snippet") or ""
                 link = res.get("link") or ""
+                res_date = res.get("date") or ""
                 if not title or not link:
                     continue
 
@@ -592,7 +665,9 @@ def fetch_serpapi_jobs(
                         "title": title,
                         "company_name": company,
                         "location": q_cfg["location"],
-                        "description": f"Source URL: {link}\nSnippet: {snippet}",
+                        "posted_date": res_date,
+                        "deadline_date": "",
+                        "description": f"Published hint: {res_date}\nSource URL: {link}\nSnippet: {snippet}",
                         "apply_url": link,
                     },
                     seen_in_batch,
@@ -611,12 +686,16 @@ def evaluate_batch(
 ) -> tuple[list[JobEvaluation], bool]:
     blocks = []
     for idx, job in enumerate(batch):
+        posted_meta = job.get("posted_date") or "Unknown"
+        deadline_meta = job.get("deadline_date") or "Unknown"
         block = (
             f"=== JOB_INDEX: {idx} ===\n"
             f"Source: {job.get('source')}\n"
             f"Title: {job.get('title')}\n"
             f"Company: {job.get('company_name')}\n"
             f"Location: {job.get('location')}\n"
+            f"Posted Date: {posted_meta}\n"
+            f"Application Deadline: {deadline_meta}\n"
             f"Description:\n{job.get('description', '')}"
         )
         blocks.append(block)
@@ -653,9 +732,22 @@ def evaluate_batch(
     return [], skip_primary
 
 
-def send_discord_embed(eval_data: JobEvaluation, apply_url: str, quota_text: str, run_date: str):
+def send_discord_embed(
+    eval_data: JobEvaluation,
+    job: dict,
+    quota_text: str,
+    run_date: str,
+    today: date,
+):
     color = 0x2ECC71 if eval_data.overall_score >= 9 else 0xF1C40F
     badge = "🟢" if eval_data.overall_score >= 9 else "🟡"
+
+    apply_url = job.get("apply_url") or "https://arbetsformedlingen.se/platsbanken"
+    posted_iso = job.get("posted_date") or eval_data.posted_date_iso
+    deadline_iso = job.get("deadline_date") or eval_data.deadline_date_iso
+
+    posted_text = format_posted_badge(posted_iso, today)
+    deadline_text = format_deadline_badge(deadline_iso, today)
 
     skills_list = eval_data.matching_skills[:4]
     skills_text = " • ".join([f"✅ {s}" for s in skills_list]) if skills_list else "Engineering Core"
@@ -673,6 +765,8 @@ def send_discord_embed(eval_data: JobEvaluation, apply_url: str, quota_text: str
             {"name": "📍 Location", "value": eval_data.location, "inline": True},
             {"name": "🏢 Model", "value": eval_data.work_model, "inline": True},
             {"name": "🗣️ Language", "value": eval_data.language_required, "inline": True},
+            {"name": "📅 Publicerad", "value": posted_text, "inline": True},
+            {"name": "⏳ Sista ansökan", "value": deadline_text, "inline": True},
             {"name": "🛠️ Key Matches", "value": skills_text[:1024], "inline": False},
             {"name": "📋 Watchouts / Req", "value": gaps_text[:1024], "inline": False},
         ],
@@ -686,7 +780,9 @@ def send_discord_embed(eval_data: JobEvaluation, apply_url: str, quota_text: str
 
 def main():
     conn = init_db()
-    run_date = get_swedish_timestamp()
+    now_cet = get_swedish_now()
+    today = now_cet.date()
+    run_date = now_cet.strftime("%Y-%m-%d %H:%M CET")
     client = genai.Client(api_key=GEMINI_API_KEY, http_options={"timeout": 60000})
 
     daily_budget, budget_status = get_serpapi_budget()
@@ -742,14 +838,13 @@ def main():
                 conn.commit()
 
                 if ev.fit_verdict != "SKIP" and ev.overall_score >= 7:
-                    default_url = "https://arbetsformedlingen.se/platsbanken"
-                    matches.append((ev, job.get("apply_url", default_url)))
+                    matches.append((ev, job))
         time.sleep(3)
 
     _, updated_quota_status = get_serpapi_budget()
     matches.sort(key=lambda x: x[0].overall_score, reverse=True)
-    for eval_data, url in matches[:20]:
-        send_discord_embed(eval_data, url, updated_quota_status, run_date)
+    for eval_data, job_item in matches[:20]:
+        send_discord_embed(eval_data, job_item, updated_quota_status, run_date, today)
 
     summary_text = (
         f"📊 **Daily Job Scout ({run_date}):** Evaluated **{evaluated_count}** new jobs "

@@ -1,6 +1,7 @@
 import os
 import re
 import html
+import math
 import calendar
 import sqlite3
 import hashlib
@@ -12,6 +13,7 @@ import requests
 from pydantic import BaseModel
 from google import genai
 from google.genai import types
+from jobspy import scrape_jobs
 
 # --- CONFIGURATION ---
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
@@ -52,18 +54,74 @@ TEAMTAILOR_FEEDS = [
     {"company": "ONE Nordic", "url": "https://karriar.one-nordic.se/jobs.rss"},
 ]
 
-# 3. Quota-Paced: SerpApi Google Jobs Engine (Single-Phrase Queries for Clean Hits)
-SERPAPI_GOOGLE_JOBS_QUERIES = [
-    {"q": "simulation engineer", "location": "Copenhagen, Denmark"},
-    {"q": "production engineer", "location": "Copenhagen, Denmark"},
-    {"q": "graduate engineer", "location": "Copenhagen, Denmark"},
-    {"q": "simulation engineer", "location": "Oslo, Norway"},
-    {"q": "production engineer", "location": "Oslo, Norway"},
-    {"q": "sivilingeniør", "location": "Oslo, Norway"},
-    {"q": "simulation engineer", "location": "Stockholm, Sweden"},
-    {"q": "production engineer", "location": "Malmö, Sweden"},
-    {"q": "mechanical engineer", "location": "Örebro, Sweden"},
-    {"q": "graduate engineer", "location": "Stockholm, Sweden"},
+# 3. Free Direct Scraper: JobSpy (LinkedIn + Indeed Full Descriptions)
+JOBSPY_QUERIES = [
+    {
+        "search_term": "simulation engineer OR production engineer OR graduate engineer",
+        "location": "Stockholm, Sweden",
+        "country_indeed": "Sweden",
+        "sites": ["linkedin", "indeed"],
+    },
+    {
+        "search_term": "production engineer OR process engineer OR industrial engineer",
+        "location": "Malmö, Sweden",
+        "country_indeed": "Sweden",
+        "sites": ["linkedin", "indeed"],
+    },
+    {
+        "search_term": "mechanical engineer OR production engineer",
+        "location": "Örebro, Sweden",
+        "country_indeed": "Sweden",
+        "sites": ["linkedin", "indeed"],
+    },
+    {
+        "search_term": "simulation engineer OR production engineer OR graduate engineer",
+        "location": "Copenhagen, Denmark",
+        "country_indeed": "Denmark",
+        "sites": ["indeed"],
+    },
+    {
+        "search_term": "simulation engineer OR production engineer OR sivilingeniør",
+        "location": "Oslo, Norway",
+        "country_indeed": "Norway",
+        "sites": ["indeed"],
+    },
+]
+
+# 4. Quota-Paced: SerpApi Google X-Ray (Proxy-Protected LinkedIn, Indeed, DK & NO)
+SERPAPI_XRAY_QUERIES = [
+    {
+        "q": 'site:linkedin.com/jobs ("simulation engineer" OR "production engineer" OR "graduate engineer") (Stockholm OR Malmö OR Örebro)',
+        "location": "Sweden",
+    },
+    {
+        "q": 'site:se.indeed.com ("simuleringsingenjör" OR "produktionsingenjör" OR "industriell ekonomi" OR "graduate engineer")',
+        "location": "Sweden",
+    },
+    {
+        "q": 'site:linkedin.com/jobs ("simulation engineer" OR "production engineer" OR "graduate engineer") Copenhagen',
+        "location": "Copenhagen",
+    },
+    {
+        "q": 'site:jobindex.dk ("simulation engineer" OR "production engineer" OR "industrial engineer")',
+        "location": "Copenhagen",
+    },
+    {
+        "q": 'site:linkedin.com/jobs ("simulation engineer" OR "production engineer" OR "graduate engineer") Oslo',
+        "location": "Oslo",
+    },
+    {
+        "q": 'site:finn.no/job ("simuleringsingeniør" OR "produksjonsingeniør" OR "sivilingeniør" OR "graduate") Oslo',
+        "location": "Oslo",
+    },
+    {
+        "q": 'site:linkedin.com/jobs ("industrial management" OR "operations analyst" OR "lean engineer") (Stockholm OR Malmö OR Copenhagen)',
+        "location": "Nordics",
+    },
+    {
+        "q": 'site:linkedin.com/jobs ("mechanical engineer" OR "process engineer") (Örebro OR Stockholm OR Södertälje)',
+        "location": "Sweden",
+    },
 ]
 
 EXCLUDED_TITLE_KEYWORDS = [
@@ -248,7 +306,7 @@ def is_target_location(location: str, title: str, description: str = "") -> bool
     primary = f"{location} {title}".lower().strip()
     if any(loc in primary for loc in ALLOWED_LOCATIONS):
         return True
-    if location.lower() in ("", "unknown", "sweden", "sverige"):
+    if location.lower() in ("", "unknown", "sweden", "sverige", "nordics"):
         head = description[:400].lower()
         return any(loc in head for loc in ALLOWED_LOCATIONS)
     return False
@@ -259,11 +317,19 @@ def strip_html(raw_html: str) -> str:
     return " ".join(text.split())
 
 
+def clean_str(val) -> str:
+    if val is None:
+        return ""
+    if isinstance(val, float) and math.isnan(val):
+        return ""
+    return str(val).strip()
+
+
 def register_job(raw_item: dict, seen_in_batch: set, output_list: list[dict]) -> bool:
-    title = (raw_item.get("title") or "").strip()
-    company = (raw_item.get("company_name") or "Unknown").strip()
-    location = (raw_item.get("location") or "").strip()
-    description = raw_item.get("description") or ""
+    title = clean_str(raw_item.get("title"))
+    company = clean_str(raw_item.get("company_name")) or "Unknown"
+    location = clean_str(raw_item.get("location"))
+    description = clean_str(raw_item.get("description"))
     if not title:
         return False
 
@@ -284,6 +350,7 @@ def register_job(raw_item: dict, seen_in_batch: set, output_list: list[dict]) ->
     raw_item["title"] = title
     raw_item["company_name"] = company
     raw_item["location"] = display_loc
+    raw_item["description"] = description[:2800]
     output_list.append(raw_item)
     return True
 
@@ -354,7 +421,7 @@ def fetch_af_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
                         "title": hit.get("headline") or "",
                         "company_name": (hit.get("employer") or {}).get("name") or "Unknown",
                         "location": (hit.get("workplace_address") or {}).get("municipality") or "",
-                        "description": ((hit.get("description") or {}).get("text") or "")[:2800],
+                        "description": (hit.get("description") or {}).get("text") or "",
                         "apply_url": hit.get("webpage_url") or "https://arbetsformedlingen.se/platsbanken",
                     },
                     seen_in_batch,
@@ -386,7 +453,6 @@ def fetch_teamtailor_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
                 title = item.findtext("title") or ""
                 link = item.findtext("link") or url.replace("/jobs.rss", "")
                 desc = strip_html(item.findtext("description") or "")
-
                 categories = [c.text for c in item.findall("category") if c.text]
                 location = ", ".join(categories) if categories else ""
 
@@ -396,7 +462,7 @@ def fetch_teamtailor_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
                         "title": title,
                         "company_name": company,
                         "location": location,
-                        "description": desc[:2800],
+                        "description": desc,
                         "apply_url": link,
                     },
                     seen_in_batch,
@@ -411,7 +477,54 @@ def fetch_teamtailor_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
     return added
 
 
-# --- SCRAPER 3: SERPAPI GOOGLE JOBS ENGINE ---
+# --- SCRAPER 3: JOBSPY (LINKEDIN + INDEED FULL DESCRIPTIONS) ---
+def fetch_jobspy_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
+    added = 0
+    for q_cfg in JOBSPY_QUERIES:
+        try:
+            df = scrape_jobs(
+                site_name=q_cfg["sites"],
+                search_term=q_cfg["search_term"],
+                location=q_cfg["location"],
+                results_wanted=12,
+                hours_old=72,
+                country_indeed=q_cfg["country_indeed"],
+                linkedin_fetch_description=True,
+                verbose=0,
+            )
+            raw_count = len(df) if df is not None else 0
+            q_added = 0
+            if raw_count > 0:
+                for row in df.to_dict(orient="records"):
+                    site_label = clean_str(row.get("site")).capitalize() or "JobSpy"
+                    apply_url = (
+                        clean_str(row.get("job_url_direct"))
+                        or clean_str(row.get("job_url"))
+                        or "https://www.linkedin.com/jobs"
+                    )
+                    ok = register_job(
+                        {
+                            "source": site_label,
+                            "title": row.get("title"),
+                            "company_name": row.get("company"),
+                            "location": row.get("location") or q_cfg["location"],
+                            "description": row.get("description"),
+                            "apply_url": apply_url,
+                        },
+                        seen_in_batch,
+                        output_list,
+                    )
+                    if ok:
+                        added += 1
+                        q_added += 1
+            print(f"[JobSpy] {q_cfg['location']}: {raw_count} scraped, {q_added} kept", flush=True)
+            time.sleep(2)
+        except Exception as e:
+            print(f"[JobSpy] Warning for {q_cfg['location']}: {str(e)[:120]}", flush=True)
+    return added
+
+
+# --- SCRAPER 4: SERPAPI GOOGLE X-RAY (PROXY-PROTECTED LINKEDIN, INDEED, DK & NO) ---
 def fetch_serpapi_jobs(
     conn: sqlite3.Connection, daily_budget: int, seen_in_batch: set, output_list: list[dict]
 ) -> tuple[int, int]:
@@ -422,13 +535,13 @@ def fetch_serpapi_jobs(
     row = conn.execute("SELECT value FROM meta_state WHERE key = 'serpapi_cursor'").fetchone()
     cursor = row[0] if row else 0
 
-    num_queries = min(daily_budget, len(SERPAPI_GOOGLE_JOBS_QUERIES))
+    num_queries = min(daily_budget, len(SERPAPI_XRAY_QUERIES))
     selected_queries = [
-        SERPAPI_GOOGLE_JOBS_QUERIES[(cursor + i) % len(SERPAPI_GOOGLE_JOBS_QUERIES)]
+        SERPAPI_XRAY_QUERIES[(cursor + i) % len(SERPAPI_XRAY_QUERIES)]
         for i in range(num_queries)
     ]
 
-    new_cursor = (cursor + num_queries) % len(SERPAPI_GOOGLE_JOBS_QUERIES)
+    new_cursor = (cursor + num_queries) % len(SERPAPI_XRAY_QUERIES)
     sql_upsert = (
         "INSERT OR REPLACE INTO meta_state (key, value) "
         "VALUES ('serpapi_cursor', ?)"
@@ -440,36 +553,35 @@ def fetch_serpapi_jobs(
     used = 0
     for q_cfg in selected_queries:
         params = {
-            "engine": "google_jobs",
+            "engine": "google",
             "q": q_cfg["q"],
-            "location": q_cfg["location"],
-            "chips": "date_posted:week",
+            "tbs": "qdr:w",
+            "num": 10,
             "api_key": SERPAPI_KEY,
         }
         try:
             resp = requests.get(SERPAPI_URL, params=params, timeout=20)
             resp.raise_for_status()
             used += 1
-            results = resp.json().get("jobs_results") or []
-            print(
-                f"[GoogleJobs] '{q_cfg['q']}' ({q_cfg['location']}): {len(results)} results",
-                flush=True,
-            )
+            results = resp.json().get("organic_results") or []
+            print(f"[SerpApi] '{q_cfg['q'][:45]}...': {len(results)} results", flush=True)
             for res in results:
-                apply_opts = res.get("apply_options") or []
-                apply_link = (
-                    apply_opts[0].get("link")
-                    if apply_opts
-                    else res.get("share_link") or "https://www.google.com/search?ibp=htl;jobs"
-                )
+                title = res.get("title") or ""
+                snippet = res.get("snippet") or ""
+                link = res.get("link") or ""
+                if not title or not link:
+                    continue
+
+                displayed = res.get("displayed_link") or "Web"
+                company = displayed.split("/")[0]
                 ok = register_job(
                     {
-                        "source": "Google Jobs",
-                        "title": res.get("title") or "",
-                        "company_name": res.get("company_name") or "Unknown",
-                        "location": res.get("location") or q_cfg["location"],
-                        "description": (res.get("description") or "")[:2800],
-                        "apply_url": apply_link,
+                        "source": "SerpApi X-Ray",
+                        "title": title,
+                        "company_name": company,
+                        "location": q_cfg["location"],
+                        "description": f"Source URL: {link}\nSnippet: {snippet}",
+                        "apply_url": link,
                     },
                     seen_in_batch,
                     output_list,
@@ -477,7 +589,7 @@ def fetch_serpapi_jobs(
                 if ok:
                     added += 1
         except Exception as e:
-            print(f"[GoogleJobs] Error for query: {e}", flush=True)
+            print(f"[SerpApi] Error for query: {e}", flush=True)
     return added, used
 
 
@@ -572,10 +684,11 @@ def main():
     raw_jobs = []
     af_count = fetch_af_jobs(seen_in_batch, raw_jobs)
     tt_count = fetch_teamtailor_jobs(seen_in_batch, raw_jobs)
+    js_count = fetch_jobspy_jobs(seen_in_batch, raw_jobs)
     serp_count, serp_used = fetch_serpapi_jobs(conn, daily_budget, seen_in_batch, raw_jobs)
     print(
         f"Total unique fetched: {len(raw_jobs)} "
-        f"(AF: {af_count}, Teamtailor: {tt_count}, GoogleJobs: {serp_count})",
+        f"(AF: {af_count}, Teamtailor: {tt_count}, JobSpy: {js_count}, SerpApi: {serp_count})",
         flush=True,
     )
 
@@ -628,7 +741,7 @@ def main():
 
     summary_text = (
         f"📊 **Daily Job Scout ({run_date}):** Evaluated **{evaluated_count}** new jobs "
-        f"(AF: {af_count}, Teamtailor: {tt_count}, GoogleJobs: {serp_count}) • "
+        f"(AF: {af_count}, Teamtailor: {tt_count}, JobSpy: {js_count}, SerpApi: {serp_count}) • "
         f"Found **{len(matches)}** matches (7+) • "
         f"SerpApi: **{updated_quota_status}** (used {serp_used} today)"
     )

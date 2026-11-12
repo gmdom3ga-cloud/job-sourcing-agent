@@ -1,8 +1,11 @@
 import os
+import re
+import html
 import calendar
 import sqlite3
 import hashlib
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from typing import Literal, List
 import requests
@@ -44,61 +47,62 @@ AF_QUERIES = [
     {"q": "verksamhetsutvecklare", "limit": 10},
 ]
 
-# 2. Quota-Paced: SerpApi Queries (Copenhagen, Oslo & Nordic Career Portals)
-SERPAPI_QUERIES = [
-    {
-        "q": 'site:linkedin.com/jobs ("simulation engineer" OR "production engineer" OR "graduate engineer") Copenhagen',
-        "location": "Copenhagen",
-    },
-    {
-        "q": 'site:jobindex.dk ("simulation engineer" OR "production engineer" OR "industrial engineer")',
-        "location": "Copenhagen",
-    },
-    {
-        "q": 'site:linkedin.com/jobs ("simulation engineer" OR "production engineer" OR "graduate engineer") Oslo',
-        "location": "Oslo",
-    },
-    {
-        "q": 'site:finn.no/job ("simuleringsingeniør" OR "produksjonsingeniør" OR "sivilingeniør" OR "graduate") Oslo',
-        "location": "Oslo",
-    },
-    {
-        "q": 'site:teamtailor.com ("simulation engineer" OR "simuleringsingenjör" OR "produktionsingenjör") (Stockholm OR Malmö OR Örebro)',
-        "location": "Sweden",
-    },
-    {
-        "q": 'site:linkedin.com/jobs ("industrial management" OR "industriell ekonomi" OR "operations analyst") (Stockholm OR Malmö OR Copenhagen)',
-        "location": "Nordics",
-    },
-    {
-        "q": 'site:linkedin.com/jobs ("lean engineer" OR "continuous improvement" OR "process engineer") (Stockholm OR Malmö OR Örebro)',
-        "location": "Sweden",
-    },
-    {
-        "q": 'site:linkedin.com/jobs ("mechanical engineer" OR "maskiningenjör") (Örebro OR Stockholm OR Malmö)',
-        "location": "Sweden",
-    },
+# 2. Unlimited & Free: Direct Teamtailor RSS Feeds (Xamera + Swedish Engineering Employers)
+# Any Teamtailor career site exposes /jobs.rss publicly. Add more companies anytime!
+TEAMTAILOR_FEEDS = [
+    {"company": "Xamera", "url": "https://karriar.xamera.se/jobs.rss"},
+    {"company": "ONE Nordic", "url": "https://karriar.one-nordic.se/jobs.rss"},
+    {"company": "Einride", "url": "https://careers.einride.tech/jobs.rss"},
+    {"company": "Tobii", "url": "https://career.tobii.com/jobs.rss"},
+    {"company": "Prevas", "url": "https://karriar.prevas.se/jobs.rss"},
+    {"company": "Knightec", "url": "https://career.knightec.se/jobs.rss"},
+    {"company": "AFRY", "url": "https://afry.teamtailor.com/jobs.rss"},
+    {"company": "Alten Sweden", "url": "https://career.alten.se/jobs.rss"},
+    {"company": "Sylog", "url": "https://karriar.sylog.se/jobs.rss"},
+    {"company": "Above Agency", "url": "https://above.teamtailor.com/jobs.rss"},
+]
+
+# 3. Quota-Paced: SerpApi Google Jobs Engine (Full Descriptions for Nordics & Sweden)
+SERPAPI_GOOGLE_JOBS_QUERIES = [
+    {"q": "simulation engineer OR production engineer", "location": "Copenhagen, Denmark"},
+    {"q": "graduate engineer OR industrial engineer", "location": "Copenhagen, Denmark"},
+    {"q": "simulation engineer OR production engineer", "location": "Oslo, Norway"},
+    {"q": "sivilingeniør OR graduate engineer", "location": "Oslo, Norway"},
+    {"q": "simulation engineer OR plant simulation", "location": "Stockholm, Sweden"},
+    {"q": "production engineer OR process engineer", "location": "Malmö, Sweden"},
+    {"q": "mechanical engineer OR lean engineer", "location": "Örebro, Sweden"},
+    {"q": "graduate engineer OR trainee engineer", "location": "Stockholm, Sweden"},
 ]
 
 EXCLUDED_TITLE_KEYWORDS = [
-    "byggkonstruktör",
+    # Construction, Civil, Building, HVAC & Electrical Infrastructure
+    "bygg",
+    "konstruktör",
+    "konstruktion",
+    "anläggning",
+    "vvs",
+    "elprojektering",
     "elkraft",
     "högspänning",
     "high-voltage",
     "hvdc",
     "telecommunications",
     "el och automation",
-    "bim-specialist",
+    "bim",
+    "arkitekt",
+    "platschef",
+    "arbetsledare bygg",
+    "fastighets",
     "kärnkraft",
-    "försvarsmakten",
-    "saab",
-    "bae systems",
-    "fmv",
-    "sjuksköterska",
-    "läkare",
-    "lärare",
-    "undersköterska",
-    "personlig assistent",
+    # Pure Software, Web, IT & Cloud Engineering
+    "software",
+    "mjukvaru",
+    "utvecklare",
+    "developer",
+    "programmerare",
+    "systemutvecklare",
+    "webbutvecklare",
+    "applikationsutvecklare",
     "cybersecurity",
     "data engineer",
     "ai engineer",
@@ -110,9 +114,59 @@ EXCLUDED_TITLE_KEYWORDS = [
     "cloud engineer",
     "network engineer",
     "application specialist",
+    "it-arkitekt",
+    "it-konsult",
+    # Defense & Military
+    "försvarsmakten",
+    "saab",
+    "bae systems",
+    "fmv",
+    # Healthcare, Education & Pure Accounting
+    "sjuksköterska",
+    "läkare",
+    "lärare",
+    "undersköterska",
+    "personlig assistent",
     "regulatory reporting",
     "financial controlling",
     "redovisningsekonom",
+]
+
+# Allowed hubs & ~1h commute zones (filters out Gothenburg, Umeå, Luleå, etc. before Gemini)
+ALLOWED_LOCATIONS = [
+    "stockholm",
+    "solna",
+    "sundbyberg",
+    "kista",
+    "nacka",
+    "täby",
+    "järfälla",
+    "huddinge",
+    "botkyrka",
+    "södertälje",
+    "uppsala",
+    "västerås",
+    "eskilstuna",
+    "örebro",
+    "kumla",
+    "hallsberg",
+    "karlskoga",
+    "malmö",
+    "lund",
+    "helsingborg",
+    "landskrona",
+    "trelleborg",
+    "staffanstorp",
+    "lomma",
+    "copenhagen",
+    "köpenhamn",
+    "københavn",
+    "oslo",
+    "remote",
+    "distans",
+    "hybrid",
+    "sweden",
+    "sverige",
 ]
 
 
@@ -156,16 +210,19 @@ You are an expert technical recruiter in Scandinavia. Evaluate EVERY numbered jo
 - Languages: Swedish (Native), English (Fluent), Pashto/Dari (Fluent), Spanish (Basic).
 
 ### SCORING & EXCLUSION RULES:
+- Domain Exclusions (Score 1, `fit_verdict`: "SKIP"):
+  1. Defense, weapons, armament, or military industry.
+  2. Civil engineering, building construction (byggnadsingenjör / konstruktion / VVS / anläggning), or real estate construction.
+  3. Pure software development, web/app/cloud/IT engineering (software engineer / systemutvecklare). Note: Physical/industrial simulation, digital twins, HIL, and MATLAB/C++ modeling ARE relevant and should NOT be excluded.
 - Primary Regions: Malmö, Örebro, Stockholm, and ~1h commute (Lund, Copenhagen, Södertälje, Karlskoga, Eskilstuna, Västerås, Helsingborg). Roles in other Swedish cities (e.g. Gothenburg) should be scored <= 5 (`fit_verdict`: "SKIP") unless remote/hybrid from target regions.
 - Oslo Exception: Roles in Oslo are eligible ONLY if `overall_score` is 9 or 10; otherwise set `fit_verdict` to "SKIP".
-- Defense Exclusion: Disqualify immediately (`overall_score`: 1, `fit_verdict`: "SKIP") if the company or role involves defense, weapons, armament, or military.
 - 9-10: Graduate/entry-level/trainee (0-2 yrs exp) matching IEM or Mechanical Engineering, simulation, Lean, or operations in target regions.
 - 7-8: Strong technical match with candidate's tools/projects (2-3+ yrs exp) or solid general engineering/analyst role in Primary Regions.
-- 1-6: Weak overlap, 5+ yrs senior role, outside target locations, or defense sector (`fit_verdict`: "SKIP").
+- 1-6: Weak overlap, 5+ yrs senior role, outside target locations, or excluded sector (`fit_verdict`: "SKIP").
 """
 
 
-# --- DATABASE & QUOTA FUNCTIONS ---
+# --- DATABASE, NORMALIZATION & FILTER HELPERS ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
@@ -180,9 +237,55 @@ def init_db():
     return conn
 
 
+def normalize_token(text: str) -> str:
+    cleaned = text.lower().strip()
+    cleaned = re.sub(r"\b(ab|as|aps|sweden|sverige|danmark|denmark|norway|norge)\b", "", cleaned)
+    cleaned = re.sub(r"[^a-z0-9åäöøæ]+", " ", cleaned)
+    return " ".join(cleaned.split())
+
+
 def get_job_hash(title: str, company: str, location: str) -> str:
-    raw = f"{title.lower().strip()}|{company.lower().strip()}|{location.lower().strip()}"
+    raw = f"{normalize_token(title)}|{normalize_token(company)}|{normalize_token(location)}"
     return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def is_target_location(location: str, title: str) -> bool:
+    combined = f"{location} {title}".lower().strip()
+    if not combined:
+        return True
+    return any(loc in combined for loc in ALLOWED_LOCATIONS)
+
+
+def strip_html(raw_html: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", html.unescape(raw_html or ""))
+    return " ".join(text.split())
+
+
+def register_job(raw_item: dict, seen_in_batch: set, output_list: list[dict]) -> bool:
+    title = (raw_item.get("title") or "").strip()
+    company = (raw_item.get("company_name") or "Unknown").strip()
+    location = (raw_item.get("location") or "Sweden").strip()
+    if not title:
+        return False
+
+    title_lower = title.lower()
+    if any(bad in title_lower for bad in EXCLUDED_TITLE_KEYWORDS):
+        return False
+
+    if not is_target_location(location, title):
+        return False
+
+    j_hash = get_job_hash(title, company, location)
+    if j_hash in seen_in_batch:
+        return False
+    seen_in_batch.add(j_hash)
+
+    raw_item["hash"] = j_hash
+    raw_item["title"] = title
+    raw_item["company_name"] = company
+    raw_item["location"] = location
+    output_list.append(raw_item)
+    return True
 
 
 def get_swedish_now() -> datetime:
@@ -216,11 +319,7 @@ def get_serpapi_budget() -> tuple[int, str]:
         last_day = calendar.monthrange(now.year, now.month)[1]
         days_left = max(1, last_day - now.day + 1)
 
-        if spendable <= 0:
-            daily_budget = 0
-        else:
-            daily_budget = max(1, spendable // days_left)
-
+        daily_budget = 0 if spendable <= 0 else max(1, spendable // days_left)
         status = (
             f"{left}/{total} left "
             f"(15% test reserve: {reserve}, today's auto-budget: {daily_budget})"
@@ -231,9 +330,9 @@ def get_serpapi_budget() -> tuple[int, str]:
         return 0, "Quota unavailable"
 
 
-# --- FETCH FROM ARBETSFÖRMEDLINGEN + PACED SERPAPI ---
-def fetch_af_jobs(seen_in_batch: set) -> list[dict]:
-    jobs = []
+# --- SCRAPER 1: ARBETSFÖRMEDLINGEN (PLATSBANKEN) ---
+def fetch_af_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
+    added = 0
     headers = {"Accept": "application/json"}
     for q_cfg in AF_QUERIES:
         params = {
@@ -247,57 +346,88 @@ def fetch_af_jobs(seen_in_batch: set) -> list[dict]:
             hits = resp.json().get("hits") or []
             print(f"[AF] '{q_cfg['q']}': {len(hits)} hits", flush=True)
             for hit in hits:
-                title = hit.get("headline") or ""
-                if not title:
-                    continue
-                company = (hit.get("employer") or {}).get("name") or "Unknown"
-                location = (hit.get("workplace_address") or {}).get("municipality") or "Sweden"
-
-                title_lower = title.lower()
-                if any(bad in title_lower for bad in EXCLUDED_TITLE_KEYWORDS):
-                    continue
-
-                j_hash = get_job_hash(title, company, location)
-                if j_hash in seen_in_batch:
-                    continue
-                seen_in_batch.add(j_hash)
-
-                desc_text = (hit.get("description") or {}).get("text") or ""
-                apply_url = hit.get("webpage_url") or "https://arbetsformedlingen.se/platsbanken"
-
-                jobs.append(
+                ok = register_job(
                     {
-                        "hash": j_hash,
                         "source": "Platsbanken",
+                        "title": hit.get("headline") or "",
+                        "company_name": (hit.get("employer") or {}).get("name") or "Unknown",
+                        "location": (hit.get("workplace_address") or {}).get("municipality") or "Sweden",
+                        "description": ((hit.get("description") or {}).get("text") or "")[:2800],
+                        "apply_url": hit.get("webpage_url") or "https://arbetsformedlingen.se/platsbanken",
+                    },
+                    seen_in_batch,
+                    output_list,
+                )
+                if ok:
+                    added += 1
+        except Exception as e:
+            print(f"[AF] Error for '{q_cfg['q']}': {e}", flush=True)
+    return added
+
+
+# --- SCRAPER 2: TEAMTAILOR DIRECT RSS FEEDS (XAMERA & NORDIC EMPLOYERS) ---
+def fetch_teamtailor_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
+    added = 0
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; JobScoutBot/1.0)"}
+    for feed in TEAMTAILOR_FEEDS:
+        company = feed["company"]
+        url = feed["url"]
+        try:
+            resp = requests.get(url, headers=headers, timeout=12)
+            if resp.status_code != 200:
+                print(f"[Teamtailor] {company}: HTTP {resp.status_code}", flush=True)
+                continue
+            root = ET.fromstring(resp.content)
+            items = root.findall(".//item")
+            feed_added = 0
+            for item in items:
+                title = item.findtext("title") or ""
+                link = item.findtext("link") or url.replace("/jobs.rss", "")
+                desc = strip_html(item.findtext("description") or "")
+
+                # Teamtailor embeds location tags or city names in description/category
+                categories = [c.text for c in item.findall("category") if c.text]
+                location = ", ".join(categories) if categories else "Sweden"
+
+                ok = register_job(
+                    {
+                        "source": f"Teamtailor ({company})",
                         "title": title,
                         "company_name": company,
                         "location": location,
-                        "description": desc_text[:2800],
-                        "apply_url": apply_url,
-                    }
+                        "description": desc[:2800],
+                        "apply_url": link,
+                    },
+                    seen_in_batch,
+                    output_list,
                 )
+                if ok:
+                    added += 1
+                    feed_added += 1
+            print(f"[Teamtailor] {company}: {len(items)} open, {feed_added} kept", flush=True)
         except Exception as e:
-            print(f"[AF] Error for '{q_cfg['q']}': {e}", flush=True)
-    return jobs
+            print(f"[Teamtailor] Error for {company}: {e}", flush=True)
+    return added
 
 
+# --- SCRAPER 3: SERPAPI GOOGLE JOBS ENGINE (FULL DESCRIPTIONS) ---
 def fetch_serpapi_jobs(
-    conn: sqlite3.Connection, daily_budget: int, seen_in_batch: set
-) -> tuple[list[dict], int]:
+    conn: sqlite3.Connection, daily_budget: int, seen_in_batch: set, output_list: list[dict]
+) -> tuple[int, int]:
     if daily_budget <= 0 or not SERPAPI_KEY:
         print(f"[SerpApi] Skipping automated search (daily_budget={daily_budget}).", flush=True)
-        return [], 0
+        return 0, 0
 
     row = conn.execute("SELECT value FROM meta_state WHERE key = 'serpapi_cursor'").fetchone()
     cursor = row[0] if row else 0
 
-    num_queries = min(daily_budget, len(SERPAPI_QUERIES))
+    num_queries = min(daily_budget, len(SERPAPI_GOOGLE_JOBS_QUERIES))
     selected_queries = [
-        SERPAPI_QUERIES[(cursor + i) % len(SERPAPI_QUERIES)]
+        SERPAPI_GOOGLE_JOBS_QUERIES[(cursor + i) % len(SERPAPI_GOOGLE_JOBS_QUERIES)]
         for i in range(num_queries)
     ]
 
-    new_cursor = (cursor + num_queries) % len(SERPAPI_QUERIES)
+    new_cursor = (cursor + num_queries) % len(SERPAPI_GOOGLE_JOBS_QUERIES)
     sql_upsert = (
         "INSERT OR REPLACE INTO meta_state (key, value) "
         "VALUES ('serpapi_cursor', ?)"
@@ -305,55 +435,46 @@ def fetch_serpapi_jobs(
     conn.execute(sql_upsert, (new_cursor,))
     conn.commit()
 
-    jobs = []
+    added = 0
     used = 0
     for q_cfg in selected_queries:
         params = {
-            "engine": "google",
+            "engine": "google_jobs",
             "q": q_cfg["q"],
-            "tbs": "qdr:w",
-            "num": 10,
+            "location": q_cfg["location"],
+            "chips": "date_posted:week",
             "api_key": SERPAPI_KEY,
         }
         try:
             resp = requests.get(SERPAPI_URL, params=params, timeout=20)
             resp.raise_for_status()
             used += 1
-            results = resp.json().get("organic_results") or []
-            print(f"[SerpApi] '{q_cfg['q'][:45]}...': {len(results)} results", flush=True)
+            results = resp.json().get("jobs_results") or []
+            print(f"[GoogleJobs] '{q_cfg['q'][:35]}' ({q_cfg['location']}): {len(results)} results", flush=True)
             for res in results:
-                title = res.get("title") or ""
-                snippet = res.get("snippet") or ""
-                link = res.get("link") or ""
-                if not title or not link:
-                    continue
-
-                title_lower = title.lower()
-                if any(bad in title_lower for bad in EXCLUDED_TITLE_KEYWORDS):
-                    continue
-
-                displayed = res.get("displayed_link") or "Web"
-                company = displayed.split("/")[0]
-                location = q_cfg["location"]
-                j_hash = get_job_hash(title, company, location)
-                if j_hash in seen_in_batch:
-                    continue
-                seen_in_batch.add(j_hash)
-
-                jobs.append(
-                    {
-                        "hash": j_hash,
-                        "source": "SerpApi",
-                        "title": title,
-                        "company_name": company,
-                        "location": location,
-                        "description": f"Source URL: {link}\nSnippet: {snippet}"[:2800],
-                        "apply_url": link,
-                    }
+                apply_opts = res.get("apply_options") or []
+                apply_link = (
+                    apply_opts[0].get("link")
+                    if apply_opts
+                    else res.get("share_link") or "https://www.google.com/search?ibp=htl;jobs"
                 )
+                ok = register_job(
+                    {
+                        "source": "Google Jobs",
+                        "title": res.get("title") or "",
+                        "company_name": res.get("company_name") or "Unknown",
+                        "location": res.get("location") or q_cfg["location"],
+                        "description": (res.get("description") or "")[:2800],
+                        "apply_url": apply_link,
+                    },
+                    seen_in_batch,
+                    output_list,
+                )
+                if ok:
+                    added += 1
         except Exception as e:
-            print(f"[SerpApi] Error for query: {e}", flush=True)
-    return jobs, used
+            print(f"[GoogleJobs] Error for query: {e}", flush=True)
+    return added, used
 
 
 # --- BATCH EVALUATE WITH QUOTA-AWARE FALLBACK ---
@@ -444,11 +565,14 @@ def main():
     print(f"[{run_date}] SerpApi budget check -> {budget_status}", flush=True)
 
     seen_in_batch = set()
-    af_jobs = fetch_af_jobs(seen_in_batch)
-    serp_jobs, serp_used = fetch_serpapi_jobs(conn, daily_budget, seen_in_batch)
-    raw_jobs = af_jobs + serp_jobs
+    raw_jobs = []
+    af_count = fetch_af_jobs(seen_in_batch, raw_jobs)
+    tt_count = fetch_teamtailor_jobs(seen_in_batch, raw_jobs)
+    gj_count, serp_used = fetch_serpapi_jobs(conn, daily_budget, seen_in_batch, raw_jobs)
+
     print(
-        f"Total unique fetched: {len(raw_jobs)} (AF: {len(af_jobs)}, SerpApi: {len(serp_jobs)})",
+        f"Total unique filtered jobs: {len(raw_jobs)} "
+        f"(AF: {af_count}, Teamtailor: {tt_count}, GoogleJobs: {gj_count})",
         flush=True,
     )
 
@@ -501,7 +625,8 @@ def main():
 
     summary_text = (
         f"📊 **Daily Job Scout ({run_date}):** Evaluated **{evaluated_count}** new jobs "
-        f"(AF: {len(af_jobs)}, SerpApi: {len(serp_jobs)}) • Found **{len(matches)}** matches (7+) • "
+        f"(AF: {af_count}, Teamtailor: {tt_count}, GoogleJobs: {gj_count}) • "
+        f"Found **{len(matches)}** matches (7+) • "
         f"SerpApi: **{updated_quota_status}** (used {serp_used} today)"
     )
     requests.post(DISCORD_WEBHOOK_URL, json={"content": summary_text}, timeout=15)

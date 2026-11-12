@@ -15,6 +15,8 @@ DISCORD_WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
 SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "")
 DB_PATH = "seen_jobs.db"
 AF_API_URL = "https://jobsearch.api.jobtechdev.se/search"
+BATCH_SIZE = 6
+GEMINI_MODELS = ["gemini-3.8-flash", "gemini-3.8-flash-lite"]
 
 STOCKHOLM_QUERIES = [
     {"q": "simuleringsingenjör Stockholm", "limit": 15},
@@ -23,14 +25,13 @@ STOCKHOLM_QUERIES = [
     {"q": "production engineer Stockholm", "limit": 15},
 ]
 
-# Fast title exclusion to skip obvious non-matches before calling Gemini
 EXCLUDED_TITLE_KEYWORDS = [
     "byggkonstruktör", "elkraft", "högspänning", "high-voltage", "hvdc",
     "telecommunications", "el och automation", "bim-specialist", "kärnkraft",
     "försvarsmakten", "saab", "bae systems", "fmv"
 ]
 
-# --- PYDANTIC SCHEMA FOR STRUCTURED OUTPUT ---
+# --- PYDANTIC SCHEMA FOR BATCH STRUCTURED OUTPUT ---
 class RequirementItem(BaseModel):
     required: str
     fit_rating: Literal["Strong Match", "Partial Match", "Stretch", "Gap"]
@@ -53,6 +54,7 @@ class RequirementsBreakdown(BaseModel):
     personal_traits: List[TraitItem]
 
 class JobEvaluation(BaseModel):
+    job_index: int
     job_title: str
     company: str
     location: str
@@ -66,8 +68,11 @@ class JobEvaluation(BaseModel):
     fit_verdict: Literal["APPLY", "CONSIDER", "SKIP"]
     match_rationale: str
 
+class BatchEvaluation(BaseModel):
+    evaluations: List[JobEvaluation]
+
 SYSTEM_PROMPT = """
-You are an expert technical recruiter and talent evaluator in Scandinavia. Evaluate the given job description against the candidate's profile, break down requirements, rate fit, and assign an overall relevance score (1-10).
+You are an expert technical recruiter and talent evaluator in Scandinavia. You will receive a numbered batch of job descriptions. Evaluate EVERY job in the batch independently against the candidate's profile, preserve its exact `job_index`, break down requirements, rate fit, and assign an overall relevance score (1-10).
 
 ### CANDIDATE PROFILE:
 - Name: Matin Ahmadi
@@ -123,7 +128,7 @@ def get_swedish_timestamp() -> str:
     cet = timezone(timedelta(hours=1))
     return datetime.now(cet).strftime("%Y-%m-%d %H:%M CET")
 
-# --- FETCH, EVALUATE & NOTIFY ---
+# --- FETCH, BATCH EVALUATE & NOTIFY ---
 def fetch_jobs():
     all_jobs = []
     seen_in_batch = set()
@@ -158,7 +163,7 @@ def fetch_jobs():
                     "title": title,
                     "company_name": company,
                     "location": location,
-                    "description": (hit.get("description") or {}).get("text", "")[:4500],
+                    "description": (hit.get("description") or {}).get("text", "")[:3200],
                     "apply_url": hit.get("webpage_url", "https://arbetsformedlingen.se/platsbanken"),
                     "employment_type": (hit.get("working_hours_type") or {}).get("label", ""),
                 })
@@ -166,23 +171,38 @@ def fetch_jobs():
             print(f"Arbetsförmedlingen search error for '{q_cfg['q']}': {e}", flush=True)
     return all_jobs
 
-def evaluate_job(client: genai.Client, job: dict) -> JobEvaluation | None:
-    job_text = f"Title: {job.get('title')}\nCompany: {job.get('company_name')}\nLocation: {job.get('location')}\nEmployment Type: {job.get('employment_type')}\nDescription:\n{job.get('description', '')}"
-    try:
-        response = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=job_text,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
-                response_mime_type="application/json",
-                response_schema=JobEvaluation,
-                temperature=0.2,
-            ),
+def evaluate_batch(client: genai.Client, batch: list[dict]) -> list[JobEvaluation]:
+    blocks = []
+    for idx, job in enumerate(batch):
+        blocks.append(
+            f"=== JOB_INDEX: {idx} ===\n"
+            f"Title: {job.get('title')}\n"
+            f"Company: {job.get('company_name')}\n"
+            f"Location: {job.get('location')}\n"
+            f"Employment Type: {job.get('employment_type')}\n"
+            f"Description:\n{job.get('description', '')}"
         )
-        return response.parsed
-    except Exception as e:
-        print(f"Gemini error for '{job.get('title')}': {e}", flush=True)
-        return None
+    prompt_text = "\n\n".join(blocks)
+
+    for model_name in GEMINI_MODELS:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt_text,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    response_mime_type="application/json",
+                    response_schema=BatchEvaluation,
+                    temperature=0.2,
+                ),
+            )
+            if response.parsed and response.parsed.evaluations:
+                print(f"Batch evaluated ({len(response.parsed.evaluations)} jobs) via {model_name}", flush=True)
+                return response.parsed.evaluations
+        except Exception as e:
+            print(f"Model {model_name} failed for batch: {e}", flush=True)
+            continue
+    return []
 
 def format_skills(skills: list[SkillItem], limit: int = 5) -> str:
     if not skills:
@@ -217,56 +237,5 @@ def send_discord_embed(eval_data: JobEvaluation, apply_url: str, quota_text: str
             {"name": "🗺️ Region Tier", "value": eval_data.region_tier, "inline": True},
             {"name": "🎓 Education & Experience", "value": edu_val[:1024], "inline": False},
             {"name": "🛠️ Mandatory Skills (Top 5)", "value": format_skills(eval_data.requirements_breakdown.skills_mandatory)[:1024], "inline": False},
-            {"name": "⭐ Meritorious Skills (Top 5)", "value": format_skills(eval_data.requirements_breakdown.skills_meritorious)[:1024], "inline": False},
-            {"name": "🤝 Proven Personal Traits", "value": traits_text[:1024], "inline": False},
-        ],
-    }
-
-    resp = requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]}, timeout=15)
-    if resp.status_code not in (200, 204):
-        print(f"Discord webhook error {resp.status_code}: {resp.text}", flush=True)
-    time.sleep(1.5)
-
-def main():
-    conn = init_db()
-    run_date = get_swedish_timestamp()
-    # timeout in google-genai HttpOptions is in milliseconds (45000 ms = 45 seconds)
-    client = genai.Client(api_key=GEMINI_API_KEY, http_options={"timeout": 45000})
-    raw_jobs = fetch_jobs()
-    print(f"[{run_date}] Fetched {len(raw_jobs)} filtered unique jobs.", flush=True)
-
-    matches = []
-    evaluated_count = 0
-    for job in raw_jobs:
-        if conn.execute("SELECT 1 FROM seen_jobs WHERE job_hash = ?", (job["hash"],)).fetchone():
-            continue
-
-        evaluation = evaluate_job(client, job)
-        evaluated_count += 1
-        if evaluation:
-            print(f"[{evaluated_count}] {job['title']} -> {evaluation.overall_score}/10 ({evaluation.fit_verdict})", flush=True)
-            conn.execute(
-                "INSERT INTO seen_jobs (job_hash, title, company, score) VALUES (?, ?, ?, ?)",
-                (job["hash"], job["title"], job["company_name"], evaluation.overall_score),
-            )
-            conn.commit()
-
-            if evaluation.fit_verdict != "SKIP" and evaluation.overall_score >= 7:
-                matches.append((evaluation, job.get("apply_url", "https://arbetsformedlingen.se/platsbanken")))
-
-        time.sleep(2)
-
-    quota_text = get_serpapi_quota()
-    matches.sort(key=lambda x: x[0].overall_score, reverse=True)
-    for eval_data, url in matches[:20]:
-        send_discord_embed(eval_data, url, quota_text, run_date)
-
-    summary_payload = {
-        "content": f"📊 **Daily Job Scout ({run_date}):** Evaluated **{evaluated_count}** new jobs • Found **{len(matches)}** matches (7+) • SerpApi: **{quota_text}**"
-    }
-    requests.post(DISCORD_WEBHOOK_URL, json=summary_payload, timeout=15)
-    print(f"Done. Sent {min(len(matches), 20)} matching jobs to Discord.", flush=True)
-
-if __name__ == "__main__":
-    main()
+            {"name": "⭐ Meritorious Skills (Top 5)", "value": format_skills(eval
     

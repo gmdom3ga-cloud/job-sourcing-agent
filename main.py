@@ -2,6 +2,7 @@ import os
 import sqlite3
 import hashlib
 import time
+from datetime import datetime, timezone, timedelta
 from typing import Literal, List
 import requests
 from pydantic import BaseModel
@@ -15,12 +16,18 @@ SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "")
 DB_PATH = "seen_jobs.db"
 AF_API_URL = "https://jobsearch.api.jobtechdev.se/search"
 
-# Targeted Stockholm queries on Arbetsförmedlingen (Platsbanken)
 STOCKHOLM_QUERIES = [
     {"q": "simuleringsingenjör Stockholm", "limit": 15},
     {"q": "produktionsingenjör Stockholm", "limit": 15},
     {"q": "simulation engineer Stockholm", "limit": 15},
     {"q": "production engineer Stockholm", "limit": 15},
+]
+
+# Fast title exclusion to skip obvious non-matches before calling Gemini
+EXCLUDED_TITLE_KEYWORDS = [
+    "byggkonstruktör", "elkraft", "högspänning", "high-voltage", "hvdc",
+    "telecommunications", "el och automation", "bim-specialist", "kärnkraft",
+    "försvarsmakten", "saab", "bae systems", "fmv"
 ]
 
 # --- PYDANTIC SCHEMA FOR STRUCTURED OUTPUT ---
@@ -112,6 +119,10 @@ def get_serpapi_quota() -> str:
         print(f"SerpApi quota check error: {e}", flush=True)
     return "Quota unavailable"
 
+def get_swedish_timestamp() -> str:
+    cet = timezone(timedelta(hours=1))
+    return datetime.now(cet).strftime("%Y-%m-%d %H:%M CET")
+
 # --- FETCH, EVALUATE & NOTIFY ---
 def fetch_jobs():
     all_jobs = []
@@ -132,16 +143,22 @@ def fetch_jobs():
                 title = hit.get("headline", "")
                 company = (hit.get("employer") or {}).get("name", "Unknown")
                 location = (hit.get("workplace_address") or {}).get("municipality", "Stockholm")
+
+                title_lower = title.lower()
+                if any(bad in title_lower for bad in EXCLUDED_TITLE_KEYWORDS):
+                    continue
+
                 j_hash = get_job_hash(title, company, location)
                 if j_hash in seen_in_batch:
                     continue
                 seen_in_batch.add(j_hash)
+
                 all_jobs.append({
                     "hash": j_hash,
                     "title": title,
                     "company_name": company,
                     "location": location,
-                    "description": (hit.get("description") or {}).get("text", "")[:5000],
+                    "description": (hit.get("description") or {}).get("text", "")[:4500],
                     "apply_url": hit.get("webpage_url", "https://arbetsformedlingen.se/platsbanken"),
                     "employment_type": (hit.get("working_hours_type") or {}).get("label", ""),
                 })
@@ -160,7 +177,6 @@ def evaluate_job(client: genai.Client, job: dict) -> JobEvaluation | None:
                 response_mime_type="application/json",
                 response_schema=JobEvaluation,
                 temperature=0.2,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
             ),
         )
         return response.parsed
@@ -178,7 +194,7 @@ def format_skills(skills: list[SkillItem], limit: int = 5) -> str:
         shown.append(f"*(+{extra} more)*")
     return " • ".join(shown)
 
-def send_discord_embed(eval_data: JobEvaluation, apply_url: str, quota_text: str):
+def send_discord_embed(eval_data: JobEvaluation, apply_url: str, quota_text: str, run_date: str):
     color = 0x2ECC71 if eval_data.overall_score >= 9 else 0xF1C40F
     badge = "🟢" if eval_data.overall_score >= 9 else "🟡"
 
@@ -192,7 +208,7 @@ def send_discord_embed(eval_data: JobEvaluation, apply_url: str, quota_text: str
         "url": apply_url,
         "description": f"*{eval_data.match_rationale}*\n\n**🏛️ Vision & Culture:** {eval_data.company_vision_values[:250]}",
         "color": color,
-        "footer": {"text": f"SerpApi Quota: {quota_text}"},
+        "footer": {"text": f"Searched: {run_date} • SerpApi Quota: {quota_text}"},
         "fields": [
             {"name": "📍 Location", "value": eval_data.location, "inline": True},
             {"name": "🏢 Model", "value": eval_data.work_model, "inline": True},
@@ -213,9 +229,11 @@ def send_discord_embed(eval_data: JobEvaluation, apply_url: str, quota_text: str
 
 def main():
     conn = init_db()
-    client = genai.Client(api_key=GEMINI_API_KEY, http_options={"timeout": 60})
+    run_date = get_swedish_timestamp()
+    # timeout in google-genai HttpOptions is in milliseconds (45000 ms = 45 seconds)
+    client = genai.Client(api_key=GEMINI_API_KEY, http_options={"timeout": 45000})
     raw_jobs = fetch_jobs()
-    print(f"Fetched {len(raw_jobs)} unique raw jobs.", flush=True)
+    print(f"[{run_date}] Fetched {len(raw_jobs)} filtered unique jobs.", flush=True)
 
     matches = []
     evaluated_count = 0
@@ -236,18 +254,19 @@ def main():
             if evaluation.fit_verdict != "SKIP" and evaluation.overall_score >= 7:
                 matches.append((evaluation, job.get("apply_url", "https://arbetsformedlingen.se/platsbanken")))
 
-        time.sleep(3)
+        time.sleep(2)
 
     quota_text = get_serpapi_quota()
     matches.sort(key=lambda x: x[0].overall_score, reverse=True)
     for eval_data, url in matches[:20]:
-        send_discord_embed(eval_data, url, quota_text)
+        send_discord_embed(eval_data, url, quota_text, run_date)
 
     summary_payload = {
-        "content": f"📊 **Daily Job Scout Summary:** Evaluated **{evaluated_count}** new jobs • Found **{len(matches)}** matches (7+) • SerpApi: **{quota_text}**"
+        "content": f"📊 **Daily Job Scout ({run_date}):** Evaluated **{evaluated_count}** new jobs • Found **{len(matches)}** matches (7+) • SerpApi: **{quota_text}**"
     }
     requests.post(DISCORD_WEBHOOK_URL, json=summary_payload, timeout=15)
     print(f"Done. Sent {min(len(matches), 20)} matching jobs to Discord.", flush=True)
 
 if __name__ == "__main__":
     main()
+    

@@ -3,7 +3,7 @@ import sqlite3
 import hashlib
 import time
 from datetime import datetime, timezone, timedelta
-from typing import List
+from typing import Literal, List
 import requests
 from pydantic import BaseModel
 from google import genai
@@ -42,13 +42,19 @@ EXCLUDED_TITLE_KEYWORDS = [
 ]
 
 
-# --- MINIMAL PYDANTIC SCHEMA FOR FAST 10-JOB BATCHES ---
+# --- LEAN, HIGH-SIGNAL PYDANTIC SCHEMA ---
 class JobEvaluation(BaseModel):
     job_index: int
     job_title: str
     company: str
     location: str
+    work_model: Literal["On-site", "Hybrid", "Remote", "Not specified"]
+    language_required: str
+    matching_skills: List[str]
+    gaps_or_requirements: List[str]
     overall_score: int
+    fit_verdict: Literal["APPLY", "CONSIDER", "SKIP"]
+    match_rationale: str
 
 
 class BatchEvaluation(BaseModel):
@@ -56,22 +62,27 @@ class BatchEvaluation(BaseModel):
 
 
 SYSTEM_PROMPT = """
-You are an expert technical recruiter in Scandinavia. Evaluate EVERY numbered job in the batch against the candidate's profile, preserve its exact `job_index`, and assign an `overall_score` (1-10).
+You are an expert technical recruiter in Scandinavia. Evaluate EVERY numbered job in the batch against the candidate's profile, preserve its exact `job_index`, and assign an `overall_score` (1-10) and `fit_verdict`. Keep `match_rationale` to 1-2 crisp sentences, `matching_skills` to max 4 short items, and `gaps_or_requirements` to max 2 short items (e.g. "2+ yrs exp", "Swedish C1", or ["None"]).
 
 ### CANDIDATE PROFILE:
 - Name: Matin Ahmadi
 - Degrees: Civilingenjör (M.Sc.) in Industrial Management & Engineering (300 ECTS) & M.Sc. in Mechanical Engineering (120 ECTS, dual degree) from Örebro University; B.Sc. Business Administration coursework complete; Exchange at BI Norwegian Business School (Oslo).
 - Core Skills: Discrete-event simulation (Siemens Tecnomatix Plant Simulation / SimTalk), multi-domain dynamic simulation (Hopsan / TLM), MATLAB & Simulink, FMU/FMI, HIL, C++, Python, CAD (PTC Creo, SolidWorks, AutoCAD), Lean Six Sigma, Kaizen/PDCA, VSM, FMEA, SAP ERP, Power BI, GIS.
-- Experience: Epiroc Rock Drills AB (Master Thesis, Grade 5, real-time hydromechanical simulation in Hopsan & C++), AstraZeneca (Discrete-event digital twin in Plant Simulation), Örebro University (TA), Malmö stad (Analyst/Team Lead), AkzoNobel & VA SYD (SAP ERP/GIS).
+- Experience:
+  * Epiroc Rock Drills AB (Master Thesis, Grade 5): Real-time hydromechanical simulation in Hopsan & C++ (7.6x faster than real-time), test-bench validation.
+  * AstraZeneca (Degree Project): Discrete-event digital twin in Plant Simulation (4,100+ lab tests), scheduling optimization (-56% failure rate, -61.3% delay).
+  * Örebro University (Teaching Assistant): Mechanics, structural mechanics, applied math, CAD.
+  * Malmö stad (Project Assistant & Analyst): Financial modeling in Excel, supervised 15-19 interns, GIS asset management.
+  * AkzoNobel & VA SYD: SAP ERP inventory management, GIS mapping.
 - Languages: Swedish (Native), English (Fluent), Pashto/Dari (Fluent), Spanish (Basic).
 
 ### SCORING & EXCLUSION RULES:
 - Primary Regions: Malmö, Örebro, Stockholm, and ~1h commute (Lund, Copenhagen, Södertälje, Karlskoga, Eskilstuna, Västerås, Helsingborg).
-- Oslo Exception: Roles in Oslo score 9-10 ONLY if near-perfect graduate/simulation/IEM match; otherwise score <= 4.
-- Defense Exclusion: Score 1 immediately if the company or role involves defense, weapons, or military.
-- 9-10: Entry-level/graduate/trainee (0-2 yrs exp) matching IEM or Mechanical Engineering, simulation, Lean, or operations.
+- Oslo Exception: Roles in Oslo are eligible ONLY if `overall_score` is 9 or 10; otherwise set `fit_verdict` to "SKIP".
+- Defense Exclusion: Disqualify immediately (`overall_score`: 1, `fit_verdict`: "SKIP") if the company or role involves defense, weapons, armament, or military.
+- 9-10: Graduate/entry-level/trainee (0-2 yrs exp) matching IEM or Mechanical Engineering, simulation, Lean, or operations.
 - 7-8: Strong technical match with candidate's tools/projects (2-3+ yrs exp) or solid general engineering/analyst role.
-- 1-6: Weak overlap, 5+ yrs senior role, outside target locations, or defense sector.
+- 1-6: Weak overlap, 5+ yrs senior role, outside target locations, or defense sector (`fit_verdict`: "SKIP").
 """
 
 
@@ -154,7 +165,7 @@ def fetch_jobs():
                         "title": title,
                         "company_name": company,
                         "location": location,
-                        "description": desc_text[:1500],
+                        "description": desc_text[:3000],
                         "apply_url": apply_url,
                     }
                 )
@@ -202,14 +213,24 @@ def send_discord_embed(eval_data: JobEvaluation, apply_url: str, quota_text: str
     color = 0x2ECC71 if eval_data.overall_score >= 9 else 0xF1C40F
     badge = "🟢" if eval_data.overall_score >= 9 else "🟡"
 
+    skills_list = eval_data.matching_skills[:4]
+    skills_text = " • ".join([f"✅ {s}" for s in skills_list]) if skills_list else "General Engineering"
+
+    gaps_list = [g for g in eval_data.gaps_or_requirements[:2] if g.lower() != "none"]
+    gaps_text = " • ".join([f"⚠️ {g}" for g in gaps_list]) if gaps_list else "None noted"
+
     embed = {
         "title": f"{badge} {eval_data.overall_score}/10 — {eval_data.job_title} ({eval_data.company})",
         "url": apply_url,
+        "description": f"*{eval_data.match_rationale}*",
         "color": color,
         "footer": {"text": f"Searched: {run_date} • SerpApi Quota: {quota_text}"},
         "fields": [
             {"name": "📍 Location", "value": eval_data.location, "inline": True},
-            {"name": "⭐ Rating", "value": f"{eval_data.overall_score}/10", "inline": True},
+            {"name": "🏢 Model", "value": eval_data.work_model, "inline": True},
+            {"name": "🗣️ Language", "value": eval_data.language_required, "inline": True},
+            {"name": "🛠️ Key Matches", "value": skills_text[:1024], "inline": False},
+            {"name": "📋 Watchouts / Req", "value": gaps_text[:1024], "inline": False},
         ],
     }
 
@@ -244,7 +265,7 @@ def main():
                 job = batch[ev.job_index]
                 evaluated_count += 1
                 print(
-                    f"[{evaluated_count}] {job['title']} -> {ev.overall_score}/10",
+                    f"[{evaluated_count}] {job['title']} -> {ev.overall_score}/10 ({ev.fit_verdict})",
                     flush=True,
                 )
                 conn.execute(
@@ -254,7 +275,7 @@ def main():
                 )
                 conn.commit()
 
-                if ev.overall_score >= 7:
+                if ev.fit_verdict != "SKIP" and ev.overall_score >= 7:
                     default_url = "https://arbetsformedlingen.se/platsbanken"
                     matches.append((ev, job.get("apply_url", default_url)))
         time.sleep(2)
@@ -274,4 +295,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    

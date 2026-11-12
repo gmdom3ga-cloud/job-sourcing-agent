@@ -47,8 +47,7 @@ AF_QUERIES = [
     {"q": "verksamhetsutvecklare", "limit": 10},
 ]
 
-# 2. Unlimited & Free: Direct Teamtailor RSS Feeds (Xamera + Swedish Engineering Employers)
-# Any Teamtailor career site exposes /jobs.rss publicly. Add more companies anytime!
+# 2. Unlimited & Free: Direct Teamtailor RSS Feeds
 TEAMTAILOR_FEEDS = [
     {"company": "Xamera", "url": "https://karriar.xamera.se/jobs.rss"},
     {"company": "ONE Nordic", "url": "https://karriar.one-nordic.se/jobs.rss"},
@@ -132,7 +131,7 @@ EXCLUDED_TITLE_KEYWORDS = [
     "redovisningsekonom",
 ]
 
-# Allowed hubs & ~1h commute zones (filters out Gothenburg, Umeå, Luleå, etc. before Gemini)
+# Allowed hubs & ~1h commute zones (blocks Gothenburg, Umeå, Luleå, etc. before Gemini)
 ALLOWED_LOCATIONS = [
     "stockholm",
     "solna",
@@ -165,8 +164,6 @@ ALLOWED_LOCATIONS = [
     "remote",
     "distans",
     "hybrid",
-    "sweden",
-    "sverige",
 ]
 
 
@@ -249,11 +246,15 @@ def get_job_hash(title: str, company: str, location: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-def is_target_location(location: str, title: str) -> bool:
-    combined = f"{location} {title}".lower().strip()
-    if not combined:
+def is_target_location(location: str, title: str, description: str = "") -> bool:
+    primary = f"{location} {title}".lower().strip()
+    if any(loc in primary for loc in ALLOWED_LOCATIONS):
         return True
-    return any(loc in combined for loc in ALLOWED_LOCATIONS)
+    # Fallback check in first 400 chars of description when RSS/ad lacks a structured municipality
+    if location.lower() in ("", "unknown", "sweden", "sverige"):
+        head = description[:400].lower()
+        return any(loc in head for loc in ALLOWED_LOCATIONS)
+    return False
 
 
 def strip_html(raw_html: str) -> str:
@@ -264,7 +265,8 @@ def strip_html(raw_html: str) -> str:
 def register_job(raw_item: dict, seen_in_batch: set, output_list: list[dict]) -> bool:
     title = (raw_item.get("title") or "").strip()
     company = (raw_item.get("company_name") or "Unknown").strip()
-    location = (raw_item.get("location") or "Sweden").strip()
+    location = (raw_item.get("location") or "").strip()
+    description = raw_item.get("description") or ""
     if not title:
         return False
 
@@ -272,10 +274,11 @@ def register_job(raw_item: dict, seen_in_batch: set, output_list: list[dict]) ->
     if any(bad in title_lower for bad in EXCLUDED_TITLE_KEYWORDS):
         return False
 
-    if not is_target_location(location, title):
+    if not is_target_location(location, title, description):
         return False
 
-    j_hash = get_job_hash(title, company, location)
+    display_loc = location or "Target Region"
+    j_hash = get_job_hash(title, company, display_loc)
     if j_hash in seen_in_batch:
         return False
     seen_in_batch.add(j_hash)
@@ -283,7 +286,7 @@ def register_job(raw_item: dict, seen_in_batch: set, output_list: list[dict]) ->
     raw_item["hash"] = j_hash
     raw_item["title"] = title
     raw_item["company_name"] = company
-    raw_item["location"] = location
+    raw_item["location"] = display_loc
     output_list.append(raw_item)
     return True
 
@@ -334,10 +337,12 @@ def get_serpapi_budget() -> tuple[int, str]:
 def fetch_af_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
     added = 0
     headers = {"Accept": "application/json"}
+    published_after = (get_swedish_now() - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S")
     for q_cfg in AF_QUERIES:
         params = {
             "q": q_cfg["q"],
             "limit": q_cfg["limit"],
+            "published-after": published_after,
             "sort": "pubdate-desc",
         }
         try:
@@ -351,7 +356,7 @@ def fetch_af_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
                         "source": "Platsbanken",
                         "title": hit.get("headline") or "",
                         "company_name": (hit.get("employer") or {}).get("name") or "Unknown",
-                        "location": (hit.get("workplace_address") or {}).get("municipality") or "Sweden",
+                        "location": (hit.get("workplace_address") or {}).get("municipality") or "",
                         "description": ((hit.get("description") or {}).get("text") or "")[:2800],
                         "apply_url": hit.get("webpage_url") or "https://arbetsformedlingen.se/platsbanken",
                     },
@@ -365,7 +370,7 @@ def fetch_af_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
     return added
 
 
-# --- SCRAPER 2: TEAMTAILOR DIRECT RSS FEEDS (XAMERA & NORDIC EMPLOYERS) ---
+# --- SCRAPER 2: TEAMTAILOR DIRECT RSS FEEDS ---
 def fetch_teamtailor_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
     added = 0
     headers = {"User-Agent": "Mozilla/5.0 (compatible; JobScoutBot/1.0)"}
@@ -385,9 +390,8 @@ def fetch_teamtailor_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
                 link = item.findtext("link") or url.replace("/jobs.rss", "")
                 desc = strip_html(item.findtext("description") or "")
 
-                # Teamtailor embeds location tags or city names in description/category
                 categories = [c.text for c in item.findall("category") if c.text]
-                location = ", ".join(categories) if categories else "Sweden"
+                location = ", ".join(categories) if categories else ""
 
                 ok = register_job(
                     {
@@ -410,7 +414,7 @@ def fetch_teamtailor_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
     return added
 
 
-# --- SCRAPER 3: SERPAPI GOOGLE JOBS ENGINE (FULL DESCRIPTIONS) ---
+# --- SCRAPER 3: SERPAPI GOOGLE JOBS ENGINE ---
 def fetch_serpapi_jobs(
     conn: sqlite3.Connection, daily_budget: int, seen_in_batch: set, output_list: list[dict]
 ) -> tuple[int, int]:
@@ -450,7 +454,10 @@ def fetch_serpapi_jobs(
             resp.raise_for_status()
             used += 1
             results = resp.json().get("jobs_results") or []
-            print(f"[GoogleJobs] '{q_cfg['q'][:35]}' ({q_cfg['location']}): {len(results)} results", flush=True)
+            print(
+                f"[GoogleJobs] '{q_cfg['q'][:35]}' ({q_cfg['location']}): {len(results)} results",
+                flush=True,
+            )
             for res in results:
                 apply_opts = res.get("apply_options") or []
                 apply_link = (
@@ -512,126 +519,4 @@ def evaluate_batch(
                     temperature=0.2,
                 ),
             )
-            evals = response.parsed.evaluations if response.parsed else []
-            if evals:
-                print(f"Batch evaluated ({len(evals)} jobs) via {model_name}", flush=True)
-                return evals, skip_primary
-        except Exception as e:
-            err_str = str(e)
-            print(f"Attempt {attempt + 1} ({model_name}) failed: {err_str[:140]}", flush=True)
-            if model_name == "gemini-3.8-flash" and "RESOURCE_EXHAUSTED" in err_str:
-                skip_primary = True
-            time.sleep(8)
-    return [], skip_primary
-
-
-def send_discord_embed(eval_data: JobEvaluation, apply_url: str, quota_text: str, run_date: str):
-    color = 0x2ECC71 if eval_data.overall_score >= 9 else 0xF1C40F
-    badge = "🟢" if eval_data.overall_score >= 9 else "🟡"
-
-    skills_list = eval_data.matching_skills[:4]
-    skills_text = " • ".join([f"✅ {s}" for s in skills_list]) if skills_list else "Engineering Core"
-
-    gaps_list = [g for g in eval_data.gaps_or_requirements[:2] if g.lower() != "none"]
-    gaps_text = " • ".join([f"⚠️ {g}" for g in gaps_list]) if gaps_list else "None"
-
-    embed = {
-        "title": f"{badge} {eval_data.overall_score}/10 — {eval_data.job_title} ({eval_data.company})",
-        "url": apply_url,
-        "description": f"*{eval_data.match_rationale}*",
-        "color": color,
-        "footer": {"text": f"Searched: {run_date} • SerpApi: {quota_text}"},
-        "fields": [
-            {"name": "📍 Location", "value": eval_data.location, "inline": True},
-            {"name": "🏢 Model", "value": eval_data.work_model, "inline": True},
-            {"name": "🗣️ Language", "value": eval_data.language_required, "inline": True},
-            {"name": "🛠️ Key Matches", "value": skills_text[:1024], "inline": False},
-            {"name": "📋 Watchouts / Req", "value": gaps_text[:1024], "inline": False},
-        ],
-    }
-
-    resp = requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]}, timeout=15)
-    if resp.status_code not in (200, 204):
-        print(f"Discord webhook error {resp.status_code}: {resp.text}", flush=True)
-    time.sleep(1.5)
-
-
-def main():
-    conn = init_db()
-    run_date = get_swedish_timestamp()
-    client = genai.Client(api_key=GEMINI_API_KEY, http_options={"timeout": 60000})
-
-    daily_budget, budget_status = get_serpapi_budget()
-    print(f"[{run_date}] SerpApi budget check -> {budget_status}", flush=True)
-
-    seen_in_batch = set()
-    raw_jobs = []
-    af_count = fetch_af_jobs(seen_in_batch, raw_jobs)
-    tt_count = fetch_teamtailor_jobs(seen_in_batch, raw_jobs)
-    gj_count, serp_used = fetch_serpapi_jobs(conn, daily_budget, seen_in_batch, raw_jobs)
-
-    print(
-        f"Total unique filtered jobs: {len(raw_jobs)} "
-        f"(AF: {af_count}, Teamtailor: {tt_count}, GoogleJobs: {gj_count})",
-        flush=True,
-    )
-
-    all_unseen = [
-        job
-        for job in raw_jobs
-        if not conn.execute("SELECT 1 FROM seen_jobs WHERE job_hash = ?", (job["hash"],)).fetchone()
-    ]
-    unseen_jobs = all_unseen[:MAX_JOBS_PER_RUN]
-    print(
-        f"Unseen jobs total: {len(all_unseen)} (evaluating up to {len(unseen_jobs)} this run)",
-        flush=True,
-    )
-
-    matches = []
-    evaluated_count = 0
-    skip_primary = False
-
-    for i in range(0, len(unseen_jobs), BATCH_SIZE):
-        batch = unseen_jobs[i : i + BATCH_SIZE]
-        evaluations, skip_primary = evaluate_batch(client, batch, skip_primary)
-        for ev in evaluations:
-            if 0 <= ev.job_index < len(batch):
-                job = batch[ev.job_index]
-                evaluated_count += 1
-                print(
-                    f"[{evaluated_count}] [{job['source']}] {job['title']} -> "
-                    f"{ev.overall_score}/10 ({ev.fit_verdict})",
-                    flush=True,
-                )
-                sql_insert = (
-                    "INSERT OR IGNORE INTO seen_jobs (job_hash, title, company, score) "
-                    "VALUES (?, ?, ?, ?)"
-                )
-                conn.execute(
-                    sql_insert,
-                    (job["hash"], job["title"], job["company_name"], ev.overall_score),
-                )
-                conn.commit()
-
-                if ev.fit_verdict != "SKIP" and ev.overall_score >= 7:
-                    default_url = "https://arbetsformedlingen.se/platsbanken"
-                    matches.append((ev, job.get("apply_url", default_url)))
-        time.sleep(3)
-
-    _, updated_quota_status = get_serpapi_budget()
-    matches.sort(key=lambda x: x[0].overall_score, reverse=True)
-    for eval_data, url in matches[:20]:
-        send_discord_embed(eval_data, url, updated_quota_status, run_date)
-
-    summary_text = (
-        f"📊 **Daily Job Scout ({run_date}):** Evaluated **{evaluated_count}** new jobs "
-        f"(AF: {af_count}, Teamtailor: {tt_count}, GoogleJobs: {gj_count}) • "
-        f"Found **{len(matches)}** matches (7+) • "
-        f"SerpApi: **{updated_quota_status}** (used {serp_used} today)"
-    )
-    requests.post(DISCORD_WEBHOOK_URL, json={"content": summary_text}, timeout=15)
-    print(f"Done. Sent {min(len(matches), 20)} matching jobs to Discord.", flush=True)
-
-
-if __name__ == "__main__":
-    main()
+  

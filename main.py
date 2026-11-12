@@ -53,15 +53,12 @@ AF_QUERIES = [
     {"q": "verksamhetsutvecklare", "limit": 10},
 ]
 
-# 2. Unlimited & Free: Direct Employer Teamtailor RSS Feeds
+# 2. Unlimited & Free: Verified Active Teamtailor RSS Feeds
 TEAMTAILOR_FEEDS = [
     {"company": "ONE Nordic", "url": "https://karriar.one-nordic.se/jobs.rss"},
-    {"company": "Sigma Industry East North", "url": "https://career.sigmaindustryeastnorth.se/jobs.rss"},
-    {"company": "DevPort", "url": "https://karriar.devport.se/jobs.rss"},
-    {"company": "Etteplan", "url": "https://etteplan.teamtailor.com/jobs.rss"},
 ]
 
-# 3. Free Direct Scraper: JobSpy (Indeed Full Descriptions; LinkedIn handled via SerpApi)
+# 3. Free Direct Scraper: JobSpy (Indeed 7-day window; LinkedIn handled via SerpApi)
 JOBSPY_QUERIES = [
     {
         "search_term": "simulation engineer OR production engineer OR graduate engineer",
@@ -337,7 +334,6 @@ def init_db() -> sqlite3.Connection:
         "(key TEXT PRIMARY KEY, value INTEGER)"
     )
 
-    # Safe schema migration for existing seen_jobs.db files
     existing_cols = {
         row[1] for row in conn.execute("PRAGMA table_info(seen_jobs)").fetchall()
     }
@@ -349,7 +345,6 @@ def init_db() -> sqlite3.Connection:
         if col_name not in existing_cols:
             conn.execute(f"ALTER TABLE seen_jobs ADD COLUMN {col_name} {col_type}")
 
-    # Prune records older than DB_RETENTION_DAYS (90 days)
     cutoff_iso = (get_swedish_now() - timedelta(days=DB_RETENTION_DAYS)).strftime("%Y-%m-%d")
     deleted = conn.execute(
         "DELETE FROM seen_jobs WHERE created_at IS NOT NULL AND created_at != '' AND created_at < ?",
@@ -445,7 +440,6 @@ def is_fuzzy_duplicate(
         return False
 
     for ex_title, ex_comp in existing_pairs:
-        # Compare titles when company matches or one side is a generic domain host
         same_company = (
             norm_comp == ex_comp
             or norm_comp in ("", "unknown", "se linkedin com", "www linkedin com", "se indeed com")
@@ -693,7 +687,7 @@ def fetch_teamtailor_jobs(
     return added
 
 
-# --- SCRAPER 3: JOBSPY (INDEED FULL DESCRIPTIONS) ---
+# --- SCRAPER 3: JOBSPY (INDEED 7-DAY FULL DESCRIPTIONS) ---
 def fetch_jobspy_jobs(
     seen_in_batch: set, batch_title_pairs: list[tuple[str, str]], output_list: list[dict]
 ) -> int:
@@ -705,7 +699,7 @@ def fetch_jobspy_jobs(
                 search_term=q_cfg["search_term"],
                 location=q_cfg["location"],
                 results_wanted=12,
-                hours_old=72,
+                hours_old=168,
                 country_indeed=q_cfg["country_indeed"],
                 fetch_description=True,
                 verbose=0,
@@ -803,7 +797,6 @@ def fetch_serpapi_jobs(
                 company = displayed.split("/")[0]
                 raw_desc = f"Published hint: {res_date}\nSource URL: {link}\nSnippet: {snippet}"
 
-                # Pass location="" so register_job verifies target cities in title/snippet
                 ok = register_job(
                     {
                         "source": "SerpApi X-Ray",
@@ -964,7 +957,6 @@ def main():
         flush=True,
     )
 
-    # Load recent seen titles from SQLite for cross-platform fuzzy deduplication
     recent_cutoff = (today - timedelta(days=14)).strftime("%Y-%m-%d")
     db_recent_rows = conn.execute(
         "SELECT title, company FROM seen_jobs "

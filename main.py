@@ -8,6 +8,7 @@ import sqlite3
 import hashlib
 import time
 import xml.etree.ElementTree as ET
+from difflib import SequenceMatcher
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone, timedelta, date
 from typing import Literal, List
@@ -26,6 +27,7 @@ AF_API_URL = "https://jobsearch.api.jobtechdev.se/search"
 SERPAPI_URL = "https://serpapi.com/search.json"
 BATCH_SIZE = 5
 MAX_JOBS_PER_RUN = 60
+DB_RETENTION_DAYS = 90
 SERPAPI_TEST_RESERVE_RATIO = 0.15
 
 # 1. Unlimited & Free: Arbetsförmedlingen (Platsbanken)
@@ -51,9 +53,12 @@ AF_QUERIES = [
     {"q": "verksamhetsutvecklare", "limit": 10},
 ]
 
-# 2. Unlimited & Free: Verified Active Teamtailor RSS Feeds
+# 2. Unlimited & Free: Direct Employer Teamtailor RSS Feeds
 TEAMTAILOR_FEEDS = [
     {"company": "ONE Nordic", "url": "https://karriar.one-nordic.se/jobs.rss"},
+    {"company": "Sigma Industry East North", "url": "https://career.sigmaindustryeastnorth.se/jobs.rss"},
+    {"company": "DevPort", "url": "https://karriar.devport.se/jobs.rss"},
+    {"company": "Etteplan", "url": "https://etteplan.teamtailor.com/jobs.rss"},
 ]
 
 # 3. Free Direct Scraper: JobSpy (Indeed Full Descriptions; LinkedIn handled via SerpApi)
@@ -90,39 +95,47 @@ JOBSPY_QUERIES = [
     },
 ]
 
-# 4. Quota-Paced: SerpApi Google X-Ray (Direct Single-Job URLs Only)
+# 4. Quota-Paced: SerpApi Google X-Ray (Country-Locked gl + Single-Job URLs Only)
 SERPAPI_XRAY_QUERIES = [
     {
         "q": 'site:linkedin.com/jobs/view ("simulation engineer" OR "production engineer" OR "graduate engineer") (Stockholm OR Malmö OR Örebro)',
-        "location": "Sweden",
+        "gl": "se",
+        "fallback_region": "Sweden",
     },
     {
         "q": 'site:se.indeed.com/viewjob ("simuleringsingenjör" OR "produktionsingenjör" OR "industriell ekonomi" OR "graduate engineer")',
-        "location": "Sweden",
+        "gl": "se",
+        "fallback_region": "Sweden",
     },
     {
         "q": 'site:linkedin.com/jobs/view ("simulation engineer" OR "production engineer" OR "graduate engineer") Copenhagen',
-        "location": "Copenhagen",
+        "gl": "dk",
+        "fallback_region": "Copenhagen",
     },
     {
         "q": 'site:jobindex.dk/vis-job ("simulation engineer" OR "production engineer" OR "industrial engineer")',
-        "location": "Copenhagen",
+        "gl": "dk",
+        "fallback_region": "Copenhagen",
     },
     {
         "q": 'site:linkedin.com/jobs/view ("simulation engineer" OR "production engineer" OR "graduate engineer") Oslo',
-        "location": "Oslo",
+        "gl": "no",
+        "fallback_region": "Oslo",
     },
     {
         "q": 'site:finn.no/job ("simuleringsingeniør" OR "produksjonsingeniør" OR "sivilingeniør" OR "graduate") Oslo',
-        "location": "Oslo",
+        "gl": "no",
+        "fallback_region": "Oslo",
     },
     {
-        "q": 'site:linkedin.com/jobs/view ("industrial management" OR "operations analyst" OR "lean engineer") (Stockholm OR Malmö OR Copenhagen)',
-        "location": "Nordics",
+        "q": 'site:linkedin.com/jobs/view ("industrial management" OR "operations analyst" OR "lean engineer") (Stockholm OR Malmö OR Södertälje)',
+        "gl": "se",
+        "fallback_region": "Sweden",
     },
     {
         "q": 'site:linkedin.com/jobs/view ("mechanical engineer" OR "process engineer") (Örebro OR Stockholm OR Södertälje)',
-        "location": "Sweden",
+        "gl": "se",
+        "fallback_region": "Sweden",
     },
 ]
 
@@ -292,7 +305,7 @@ You are an expert technical recruiter in Scandinavia. Evaluate EVERY numbered jo
   3. Civil engineering, building construction (byggnadsingenjör / konstruktion / VVS / anläggning), or real estate construction.
   4. Pure software development, web/app/cloud/IT engineering (software engineer / systemutvecklare). Note: Physical/industrial simulation, digital twins, HIL, and MATLAB/C++ modeling ARE relevant and should NOT be excluded.
   5. Pure wet-lab chemistry, analytical biochemistry, microbiology, or R&D molecular biology (biokemist / kemist / labbingenjör / mikrobiolog). Note: Pharmaceutical manufacturing, process engineering, medical device assembly, Lean/operations, and discrete-event simulation at pharma companies (e.g., AstraZeneca) ARE highly relevant and should be scored high.
-- Primary Regions: Malmö, Örebro, Stockholm, and ~1h commute (Lund, Copenhagen, Södertälje, Karlskoga, Eskilstuna, Västerås, Helsingborg). Roles in other Swedish cities (e.g. Gothenburg) should be scored <= 5 (`fit_verdict`: "SKIP") unless remote/hybrid from target regions.
+- Primary Regions: Malmö, Örebro, Stockholm, and ~1h commute (Lund, Copenhagen, Södertälje, Karlskoga, Eskilstuna, Västerås, Helsingborg). Roles in other Swedish cities (e.g. Gothenburg) or outside Scandinavia should be scored <= 5 (`fit_verdict`: "SKIP") unless remote/hybrid from target regions.
 - Oslo Exception: Roles in Oslo are eligible ONLY if `overall_score` is 9 or 10; otherwise set `fit_verdict` to "SKIP".
 - 9-10: Graduate/entry-level/trainee (0-2 yrs exp) matching IEM or Mechanical Engineering, simulation, Lean, or operations in target regions.
 - 7-8: Strong technical match with candidate's tools/projects (2-3+ yrs exp) or solid general engineering/analyst role in Primary Regions.
@@ -301,27 +314,52 @@ You are an expert technical recruiter in Scandinavia. Evaluate EVERY numbered jo
 
 
 # --- DATABASE, DATE, NORMALIZATION & FILTER HELPERS ---
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS seen_jobs "
-        "(job_hash TEXT PRIMARY KEY, title TEXT, company TEXT, score INTEGER)"
-    )
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS meta_state "
-        "(key TEXT PRIMARY KEY, value INTEGER)"
-    )
-    conn.commit()
-    return conn
-
-
 def get_swedish_now() -> datetime:
     cet = timezone(timedelta(hours=1))
     return datetime.now(cet)
 
 
-def get_swedish_timestamp() -> str:
-    return get_swedish_now().strftime("%Y-%m-%d %H:%M CET")
+def init_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS seen_jobs ("
+        "job_hash TEXT PRIMARY KEY, "
+        "title TEXT, "
+        "company TEXT, "
+        "score INTEGER, "
+        "source TEXT, "
+        "apply_url TEXT, "
+        "created_at TEXT"
+        ")"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS meta_state "
+        "(key TEXT PRIMARY KEY, value INTEGER)"
+    )
+
+    # Safe schema migration for existing seen_jobs.db files
+    existing_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(seen_jobs)").fetchall()
+    }
+    for col_name, col_type in [
+        ("source", "TEXT"),
+        ("apply_url", "TEXT"),
+        ("created_at", "TEXT"),
+    ]:
+        if col_name not in existing_cols:
+            conn.execute(f"ALTER TABLE seen_jobs ADD COLUMN {col_name} {col_type}")
+
+    # Prune records older than DB_RETENTION_DAYS (90 days)
+    cutoff_iso = (get_swedish_now() - timedelta(days=DB_RETENTION_DAYS)).strftime("%Y-%m-%d")
+    deleted = conn.execute(
+        "DELETE FROM seen_jobs WHERE created_at IS NOT NULL AND created_at != '' AND created_at < ?",
+        (cutoff_iso,),
+    ).rowcount
+    if deleted:
+        print(f"[DB] Pruned {deleted} expired rows older than {cutoff_iso}", flush=True)
+
+    conn.commit()
+    return conn
 
 
 def parse_iso_date(val) -> str:
@@ -384,7 +422,11 @@ def format_deadline_badge(iso_str: str, today: date) -> str:
 
 def normalize_token(text: str) -> str:
     cleaned = text.lower().strip()
-    cleaned = re.sub(r"\b(ab|as|aps|sweden|sverige|danmark|denmark|norway|norge)\b", "", cleaned)
+    cleaned = re.sub(
+        r"\b(ab|as|aps|sweden|sverige|danmark|denmark|norway|norge|linkedin|indeed)\b",
+        "",
+        cleaned,
+    )
     cleaned = re.sub(r"[^a-z0-9åäöøæ]+", " ", cleaned)
     return " ".join(cleaned.split())
 
@@ -394,12 +436,34 @@ def get_job_hash(title: str, company: str, location: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def is_fuzzy_duplicate(
+    title: str, company: str, existing_pairs: list[tuple[str, str]]
+) -> bool:
+    norm_title = normalize_token(title)
+    norm_comp = normalize_token(company)
+    if not norm_title:
+        return False
+
+    for ex_title, ex_comp in existing_pairs:
+        # Compare titles when company matches or one side is a generic domain host
+        same_company = (
+            norm_comp == ex_comp
+            or norm_comp in ("", "unknown", "se linkedin com", "www linkedin com", "se indeed com")
+            or ex_comp in ("", "unknown", "se linkedin com", "www linkedin com", "se indeed com")
+        )
+        if not same_company:
+            continue
+        if SequenceMatcher(None, norm_title, ex_title).ratio() >= 0.82:
+            return True
+    return False
+
+
 def is_target_location(location: str, title: str, description: str = "") -> bool:
     primary = f"{location} {title}".lower().strip()
     if any(loc in primary for loc in ALLOWED_LOCATIONS):
         return True
     if location.lower() in ("", "unknown", "sweden", "sverige", "nordics"):
-        head = description[:400].lower()
+        head = description[:600].lower()
         return any(loc in head for loc in ALLOWED_LOCATIONS)
     return False
 
@@ -432,7 +496,6 @@ def enrich_xray_page(url: str, fallback_snippet: str) -> tuple[str, str, str]:
             return fallback_snippet, "", ""
         page_html = resp.text
 
-        # 1. Try structured Schema.org JobPosting JSON-LD
         for match in re.findall(
             r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
             page_html,
@@ -451,7 +514,6 @@ def enrich_xray_page(url: str, fallback_snippet: str) -> tuple[str, str, str]:
             except Exception:
                 continue
 
-        # 2. Fallback to OpenGraph / meta description
         meta_m = re.search(
             r'<meta[^>]+(?:name|property)=["\'](?:description|og:description)["\'][^>]+content=["\'](.*?)["\']',
             page_html,
@@ -466,7 +528,12 @@ def enrich_xray_page(url: str, fallback_snippet: str) -> tuple[str, str, str]:
     return fallback_snippet, "", ""
 
 
-def register_job(raw_item: dict, seen_in_batch: set, output_list: list[dict]) -> bool:
+def register_job(
+    raw_item: dict,
+    seen_in_batch: set,
+    batch_title_pairs: list[tuple[str, str]],
+    output_list: list[dict],
+) -> bool:
     title = clean_str(raw_item.get("title"))
     company = clean_str(raw_item.get("company_name")) or "Unknown"
     location = clean_str(raw_item.get("location"))
@@ -481,11 +548,15 @@ def register_job(raw_item: dict, seen_in_batch: set, output_list: list[dict]) ->
     if not is_target_location(location, title, description):
         return False
 
-    display_loc = location or "Target Region"
+    display_loc = location or clean_str(raw_item.get("fallback_region")) or "Target Region"
     j_hash = get_job_hash(title, company, display_loc)
     if j_hash in seen_in_batch:
         return False
+    if is_fuzzy_duplicate(title, company, batch_title_pairs):
+        return False
+
     seen_in_batch.add(j_hash)
+    batch_title_pairs.append((normalize_token(title), normalize_token(company)))
 
     raw_item["hash"] = j_hash
     raw_item["title"] = title
@@ -532,7 +603,9 @@ def get_serpapi_budget() -> tuple[int, str]:
 
 
 # --- SCRAPER 1: ARBETSFÖRMEDLINGEN (PLATSBANKEN) ---
-def fetch_af_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
+def fetch_af_jobs(
+    seen_in_batch: set, batch_title_pairs: list[tuple[str, str]], output_list: list[dict]
+) -> int:
     added = 0
     headers = {"Accept": "application/json"}
     published_after = (get_swedish_now() - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S")
@@ -561,6 +634,7 @@ def fetch_af_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
                         "apply_url": hit.get("webpage_url") or "https://arbetsformedlingen.se/platsbanken",
                     },
                     seen_in_batch,
+                    batch_title_pairs,
                     output_list,
                 )
                 if ok:
@@ -571,7 +645,9 @@ def fetch_af_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
 
 
 # --- SCRAPER 2: TEAMTAILOR DIRECT RSS FEEDS ---
-def fetch_teamtailor_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
+def fetch_teamtailor_jobs(
+    seen_in_batch: set, batch_title_pairs: list[tuple[str, str]], output_list: list[dict]
+) -> int:
     added = 0
     headers = {"User-Agent": "Mozilla/5.0 (compatible; JobScoutBot/1.0)"}
     for feed in TEAMTAILOR_FEEDS:
@@ -605,6 +681,7 @@ def fetch_teamtailor_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
                         "apply_url": link,
                     },
                     seen_in_batch,
+                    batch_title_pairs,
                     output_list,
                 )
                 if ok:
@@ -617,7 +694,9 @@ def fetch_teamtailor_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
 
 
 # --- SCRAPER 3: JOBSPY (INDEED FULL DESCRIPTIONS) ---
-def fetch_jobspy_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
+def fetch_jobspy_jobs(
+    seen_in_batch: set, batch_title_pairs: list[tuple[str, str]], output_list: list[dict]
+) -> int:
     added = 0
     for q_cfg in JOBSPY_QUERIES:
         try:
@@ -653,6 +732,7 @@ def fetch_jobspy_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
                             "apply_url": apply_url,
                         },
                         seen_in_batch,
+                        batch_title_pairs,
                         output_list,
                     )
                     if ok:
@@ -665,9 +745,13 @@ def fetch_jobspy_jobs(seen_in_batch: set, output_list: list[dict]) -> int:
     return added
 
 
-# --- SCRAPER 4: SERPAPI GOOGLE X-RAY (SINGLE-JOB PAGES + FULL DESCRIPTION ENRICHMENT) ---
+# --- SCRAPER 4: SERPAPI GOOGLE X-RAY (COUNTRY-LOCKED + FULL DESCRIPTION ENRICHMENT) ---
 def fetch_serpapi_jobs(
-    conn: sqlite3.Connection, daily_budget: int, seen_in_batch: set, output_list: list[dict]
+    conn: sqlite3.Connection,
+    daily_budget: int,
+    seen_in_batch: set,
+    batch_title_pairs: list[tuple[str, str]],
+    output_list: list[dict],
 ) -> tuple[int, int]:
     if daily_budget <= 0 or not SERPAPI_KEY:
         print(f"[SerpApi] Skipping automated search (daily_budget={daily_budget}).", flush=True)
@@ -696,6 +780,7 @@ def fetch_serpapi_jobs(
         params = {
             "engine": "google",
             "q": q_cfg["q"],
+            "gl": q_cfg["gl"],
             "tbs": "qdr:w",
             "num": 10,
             "api_key": SERPAPI_KEY,
@@ -718,24 +803,26 @@ def fetch_serpapi_jobs(
                 company = displayed.split("/")[0]
                 raw_desc = f"Published hint: {res_date}\nSource URL: {link}\nSnippet: {snippet}"
 
+                # Pass location="" so register_job verifies target cities in title/snippet
                 ok = register_job(
                     {
                         "source": "SerpApi X-Ray",
                         "title": title,
                         "company_name": company,
-                        "location": q_cfg["location"],
+                        "location": "",
+                        "fallback_region": q_cfg["fallback_region"],
                         "posted_date": res_date,
                         "deadline_date": "",
                         "description": raw_desc,
                         "apply_url": link,
                     },
                     seen_in_batch,
+                    batch_title_pairs,
                     output_list,
                 )
                 if ok:
                     added += 1
                     item = output_list[-1]
-                    # Only enrich if not already in seen_jobs.db
                     exists = conn.execute(
                         "SELECT 1 FROM seen_jobs WHERE job_hash = ?", (item["hash"],)
                     ).fetchone()
@@ -855,6 +942,7 @@ def main():
     conn = init_db()
     now_cet = get_swedish_now()
     today = now_cet.date()
+    today_iso = today.strftime("%Y-%m-%d")
     run_date = now_cet.strftime("%Y-%m-%d %H:%M CET")
     client = genai.Client(api_key=GEMINI_API_KEY, http_options={"timeout": 60000})
 
@@ -862,22 +950,39 @@ def main():
     print(f"[{run_date}] SerpApi budget check -> {budget_status}", flush=True)
 
     seen_in_batch = set()
+    batch_title_pairs = []
     raw_jobs = []
-    af_count = fetch_af_jobs(seen_in_batch, raw_jobs)
-    tt_count = fetch_teamtailor_jobs(seen_in_batch, raw_jobs)
-    js_count = fetch_jobspy_jobs(seen_in_batch, raw_jobs)
-    serp_count, serp_used = fetch_serpapi_jobs(conn, daily_budget, seen_in_batch, raw_jobs)
+    af_count = fetch_af_jobs(seen_in_batch, batch_title_pairs, raw_jobs)
+    tt_count = fetch_teamtailor_jobs(seen_in_batch, batch_title_pairs, raw_jobs)
+    js_count = fetch_jobspy_jobs(seen_in_batch, batch_title_pairs, raw_jobs)
+    serp_count, serp_used = fetch_serpapi_jobs(
+        conn, daily_budget, seen_in_batch, batch_title_pairs, raw_jobs
+    )
     print(
         f"Total unique fetched: {len(raw_jobs)} "
         f"(AF: {af_count}, Teamtailor: {tt_count}, JobSpy: {js_count}, SerpApi: {serp_count})",
         flush=True,
     )
 
-    all_unseen = [
-        job
-        for job in raw_jobs
-        if not conn.execute("SELECT 1 FROM seen_jobs WHERE job_hash = ?", (job["hash"],)).fetchone()
+    # Load recent seen titles from SQLite for cross-platform fuzzy deduplication
+    recent_cutoff = (today - timedelta(days=14)).strftime("%Y-%m-%d")
+    db_recent_rows = conn.execute(
+        "SELECT title, company FROM seen_jobs "
+        "WHERE created_at IS NULL OR created_at = '' OR created_at >= ?",
+        (recent_cutoff,),
+    ).fetchall()
+    db_recent_pairs = [
+        (normalize_token(r[0] or ""), normalize_token(r[1] or "")) for r in db_recent_rows
     ]
+
+    all_unseen = []
+    for job in raw_jobs:
+        if conn.execute("SELECT 1 FROM seen_jobs WHERE job_hash = ?", (job["hash"],)).fetchone():
+            continue
+        if is_fuzzy_duplicate(job["title"], job["company_name"], db_recent_pairs):
+            continue
+        all_unseen.append(job)
+
     unseen_jobs = all_unseen[:MAX_JOBS_PER_RUN]
     print(
         f"Unseen jobs total: {len(all_unseen)} (evaluating up to {len(unseen_jobs)} this run)",
@@ -901,12 +1006,21 @@ def main():
                     flush=True,
                 )
                 sql_insert = (
-                    "INSERT OR IGNORE INTO seen_jobs (job_hash, title, company, score) "
-                    "VALUES (?, ?, ?, ?)"
+                    "INSERT OR IGNORE INTO seen_jobs "
+                    "(job_hash, title, company, score, source, apply_url, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)"
                 )
                 conn.execute(
                     sql_insert,
-                    (job["hash"], job["title"], job["company_name"], ev.overall_score),
+                    (
+                        job["hash"],
+                        job["title"],
+                        job["company_name"],
+                        ev.overall_score,
+                        job.get("source", ""),
+                        job.get("apply_url", ""),
+                        today_iso,
+                    ),
                 )
                 conn.commit()
 

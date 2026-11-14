@@ -22,46 +22,69 @@ from jobspy import scrape_jobs
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 DISCORD_WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
 SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "")
+EVENT_NAME = os.environ.get("EVENT_NAME", "schedule")
 DB_PATH = "seen_jobs.db"
 AF_API_URL = "https://jobsearch.api.jobtechdev.se/search"
 SERPAPI_URL = "https://serpapi.com/search.json"
-BATCH_SIZE = 5
-MAX_JOBS_PER_RUN = 60
+BATCH_SIZE = 8
+MAX_JOBS_PER_RUN = 100
 DB_RETENTION_DAYS = 90
 SERPAPI_TEST_RESERVE_RATIO = 0.15
 
-# 1. Unlimited & Free: Arbetsförmedlingen (Platsbanken)
+# 1. Unlimited & Free: Expanded Arbetsförmedlingen (Platsbanken)
 AF_QUERIES = [
-    {"q": "industriell ekonomi", "limit": 20},
-    {"q": "maskinteknik", "limit": 20},
-    {"q": "civilingenjör trainee", "limit": 15},
-    {"q": "graduate engineer", "limit": 15},
-    {"q": "ingenjör Stockholm", "limit": 15},
-    {"q": "engineer Stockholm", "limit": 15},
-    {"q": "ingenjör Örebro", "limit": 15},
-    {"q": "ingenjör Malmö", "limit": 15},
-    {"q": "ingenjör Lund", "limit": 10},
-    {"q": "ingenjör Södertälje", "limit": 10},
-    {"q": "ingenjör Västerås", "limit": 10},
-    {"q": "simuleringsingenjör", "limit": 15},
-    {"q": "simulation engineer", "limit": 15},
-    {"q": "produktionsingenjör", "limit": 15},
-    {"q": "production engineer", "limit": 15},
-    {"q": "processingenjör", "limit": 15},
-    {"q": "lean six sigma", "limit": 10},
-    {"q": "supply chain analyst", "limit": 10},
-    {"q": "verksamhetsutvecklare", "limit": 10},
+    {"q": "industriell ekonomi", "limit": 40},
+    {"q": "maskinteknik", "limit": 40},
+    {"q": "civilingenjör trainee", "limit": 40},
+    {"q": "graduate engineer", "limit": 40},
+    {"q": "junior ingenjör", "limit": 40},
+    {"q": "nyexaminerad ingenjör", "limit": 40},
+    {"q": "trainee ingenjör", "limit": 40},
+    {"q": "ingenjör Stockholm", "limit": 40},
+    {"q": "engineer Stockholm", "limit": 40},
+    {"q": "ingenjör Örebro", "limit": 40},
+    {"q": "ingenjör Malmö", "limit": 40},
+    {"q": "ingenjör Lund", "limit": 30},
+    {"q": "ingenjör Södertälje", "limit": 30},
+    {"q": "ingenjör Västerås", "limit": 30},
+    {"q": "simuleringsingenjör", "limit": 40},
+    {"q": "simulation engineer", "limit": 40},
+    {"q": "beräkningsingenjör", "limit": 40},
+    {"q": "produktionsingenjör", "limit": 40},
+    {"q": "production engineer", "limit": 40},
+    {"q": "processingenjör", "limit": 40},
+    {"q": "kvalitetsingenjör", "limit": 40},
+    {"q": "quality engineer", "limit": 40},
+    {"q": "projektingenjör", "limit": 40},
+    {"q": "project engineer", "limit": 40},
+    {"q": "logistikingenjör", "limit": 40},
+    {"q": "supply chain", "limit": 40},
+    {"q": "driftingenjör", "limit": 30},
+    {"q": "underhållsingenjör", "limit": 30},
+    {"q": "reliability engineer", "limit": 30},
+    {"q": "utvecklingsingenjör", "limit": 40},
+    {"q": "R&D engineer", "limit": 40},
+    {"q": "lean six sigma", "limit": 30},
+    {"q": "verksamhetsutvecklare", "limit": 30},
 ]
 
 # 2. Unlimited & Free: Verified Active Teamtailor RSS Feeds
 TEAMTAILOR_FEEDS = [
     {"company": "ONE Nordic", "url": "https://karriar.one-nordic.se/jobs.rss"},
+    {"company": "Combine Control Systems", "url": "https://combine.teamtailor.com/jobs.rss"},
+    {"company": "AQ Engineering", "url": "https://aqengineering.teamtailor.com/jobs.rss"},
 ]
 
-# 3. Free Direct Scraper: JobSpy (Indeed 7-day window; LinkedIn handled via SerpApi)
+# 3. Free Direct Scraper: Expanded JobSpy (Indeed 7-day window; LinkedIn via SerpApi)
 JOBSPY_QUERIES = [
     {
         "search_term": "simulation engineer OR production engineer OR graduate engineer",
+        "location": "Stockholm, Sweden",
+        "country_indeed": "Sweden",
+        "sites": ["indeed"],
+    },
+    {
+        "search_term": "quality engineer OR project engineer OR supply chain OR R&D engineer",
         "location": "Stockholm, Sweden",
         "country_indeed": "Sweden",
         "sites": ["indeed"],
@@ -73,13 +96,25 @@ JOBSPY_QUERIES = [
         "sites": ["indeed"],
     },
     {
-        "search_term": "mechanical engineer OR production engineer",
+        "search_term": "quality engineer OR project engineer OR supply chain OR operations analyst",
+        "location": "Malmö, Sweden",
+        "country_indeed": "Sweden",
+        "sites": ["indeed"],
+    },
+    {
+        "search_term": "mechanical engineer OR production engineer OR project engineer",
         "location": "Örebro, Sweden",
         "country_indeed": "Sweden",
         "sites": ["indeed"],
     },
     {
         "search_term": "simulation engineer OR production engineer OR graduate engineer",
+        "location": "Copenhagen, Denmark",
+        "country_indeed": "Denmark",
+        "sites": ["indeed"],
+    },
+    {
+        "search_term": "quality engineer OR project engineer OR supply chain OR operations",
         "location": "Copenhagen, Denmark",
         "country_indeed": "Denmark",
         "sites": ["indeed"],
@@ -100,7 +135,12 @@ SERPAPI_XRAY_QUERIES = [
         "fallback_region": "Sweden",
     },
     {
-        "q": 'site:se.indeed.com/viewjob ("simuleringsingenjör" OR "produktionsingenjör" OR "industriell ekonomi" OR "graduate engineer")',
+        "q": 'site:*.teamtailor.com/jobs ("engineer" OR "ingenjör") (Stockholm OR Malmö OR Örebro OR Västerås OR Södertälje)',
+        "gl": "se",
+        "fallback_region": "Sweden",
+    },
+    {
+        "q": 'site:se.indeed.com/viewjob ("simuleringsingenjör" OR "produktionsingenjör" OR "kvalitetsingenjör" OR "graduate engineer")',
         "gl": "se",
         "fallback_region": "Sweden",
     },
@@ -125,7 +165,7 @@ SERPAPI_XRAY_QUERIES = [
         "fallback_region": "Oslo",
     },
     {
-        "q": 'site:linkedin.com/jobs/view ("industrial management" OR "operations analyst" OR "lean engineer") (Stockholm OR Malmö OR Södertälje)',
+        "q": 'site:linkedin.com/jobs/view ("quality engineer" OR "project engineer" OR "supply chain" OR "lean engineer") (Stockholm OR Malmö OR Södertälje)',
         "gl": "se",
         "fallback_region": "Sweden",
     },
@@ -304,9 +344,10 @@ You are an expert technical recruiter in Scandinavia. Evaluate EVERY numbered jo
   5. Pure wet-lab chemistry, analytical biochemistry, microbiology, or R&D molecular biology (biokemist / kemist / labbingenjör / mikrobiolog). Note: Pharmaceutical manufacturing, process engineering, medical device assembly, Lean/operations, and discrete-event simulation at pharma companies (e.g., AstraZeneca) ARE highly relevant and should be scored high.
 - Primary Regions: Malmö, Örebro, Stockholm, and ~1h commute (Lund, Copenhagen, Södertälje, Karlskoga, Eskilstuna, Västerås, Helsingborg). Roles in other Swedish cities (e.g. Gothenburg) or outside Scandinavia should be scored <= 5 (`fit_verdict`: "SKIP") unless remote/hybrid from target regions.
 - Oslo Exception: Roles in Oslo are eligible ONLY if `overall_score` is 9 or 10; otherwise set `fit_verdict` to "SKIP".
-- 9-10: Graduate/entry-level/trainee (0-2 yrs exp) matching IEM or Mechanical Engineering, simulation, Lean, or operations in target regions.
-- 7-8: Strong technical match with candidate's tools/projects (2-3+ yrs exp) or solid general engineering/analyst role in Primary Regions.
-- 1-6: Weak overlap, 5+ yrs senior role, outside target locations, or excluded sector (`fit_verdict`: "SKIP").
+- 9-10 (`APPLY`): Graduate/entry-level/trainee (0-2 yrs exp) matching IEM or Mechanical Engineering, simulation, Lean, or operations in target regions.
+- 7-8 (`CONSIDER`): Strong technical match with candidate's tools/projects (2-3+ yrs exp) or solid engineering/quality/project/supply chain role in Primary Regions.
+- 6 (`CONSIDER`): Adjacent entry/mid-level engineering, reliability, R&D, or operations/analyst role in Primary Regions where dual M.Sc. IEM & Mechanical Engineering is a credible fit.
+- 1-5 (`SKIP`): Weak overlap, 5+ yrs senior role, outside target locations, or excluded sector.
 """
 
 
@@ -586,9 +627,12 @@ def get_serpapi_budget() -> tuple[int, str]:
         days_left = max(1, last_day - now.day + 1)
 
         daily_budget = 0 if spendable <= 0 else max(1, spendable // days_left)
+        if EVENT_NAME == "workflow_dispatch":
+            daily_budget = min(daily_budget, 2)
+
         status = (
             f"{left}/{total} left "
-            f"(15% test reserve: {reserve}, today's auto-budget: {daily_budget})"
+            f"(15% test reserve: {reserve}, run budget: {daily_budget})"
         )
         return daily_budget, status
     except Exception as e:
@@ -698,7 +742,7 @@ def fetch_jobspy_jobs(
                 site_name=q_cfg["sites"],
                 search_term=q_cfg["search_term"],
                 location=q_cfg["location"],
-                results_wanted=12,
+                results_wanted=25,
                 hours_old=168,
                 country_indeed=q_cfg["country_indeed"],
                 fetch_description=True,
@@ -832,7 +876,7 @@ def fetch_serpapi_jobs(
     return added, used
 
 
-# --- BATCH EVALUATE WITH QUOTA-AWARE FALLBACK & EXPONENTIAL 503 BACKOFF ---
+# --- BATCH EVALUATE WITH 4-TIER MODEL FALLBACK & EXPONENTIAL 503 BACKOFF ---
 def evaluate_batch(
     client: genai.Client, batch: list[dict], skip_primary: bool
 ) -> tuple[list[JobEvaluation], bool]:
@@ -854,11 +898,11 @@ def evaluate_batch(
     prompt_text = "\n\n".join(blocks)
 
     models_to_try = (
-        ["gemini-3.5-flash-lite", "gemini-3.5-flash-lite", "gemini-3.5-flash-lite"]
+        ["gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash-lite"]
         if skip_primary
-        else ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.5-flash-lite"]
+        else ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash-lite"]
     )
-    backoff_seconds = [10, 20, 35]
+    backoff_seconds = [10, 20, 35, 45]
 
     for attempt, model_name in enumerate(models_to_try):
         try:
@@ -892,10 +936,18 @@ def send_discord_embed(
     run_date: str,
     today: date,
 ):
-    color = 0x2ECC71 if eval_data.overall_score >= 9 else 0xF1C40F
-    badge = "🟢" if eval_data.overall_score >= 9 else "🟡"
+    if eval_data.overall_score >= 9:
+        color = 0x2ECC71
+        badge = "🟢 TOP MATCH"
+    elif eval_data.overall_score >= 7:
+        color = 0xF1C40F
+        badge = "🟡"
+    else:
+        color = 0x3498DB
+        badge = "🔵"
 
     apply_url = job.get("apply_url") or "https://arbetsformedlingen.se/platsbanken"
+    source_name = job.get("source") or "Job Board"
     posted_iso = job.get("posted_date") or eval_data.posted_date_iso
     deadline_iso = job.get("deadline_date") or eval_data.deadline_date_iso
 
@@ -913,7 +965,7 @@ def send_discord_embed(
         "url": apply_url,
         "description": f"*{eval_data.match_rationale}*",
         "color": color,
-        "footer": {"text": f"Searched: {run_date} • SerpApi: {quota_text}"},
+        "footer": {"text": f"Source: {source_name} • Searched: {run_date} • SerpApi: {quota_text}"},
         "fields": [
             {"name": "📍 Location", "value": eval_data.location, "inline": True},
             {"name": "🏢 Model", "value": eval_data.work_model, "inline": True},
@@ -925,7 +977,11 @@ def send_discord_embed(
         ],
     }
 
-    resp = requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]}, timeout=15)
+    payload = {"embeds": [embed]}
+    if eval_data.overall_score >= 9:
+        payload["content"] = f"🔥 **9–10/10 High-Priority Match:** {eval_data.job_title} @ {eval_data.company}"
+
+    resp = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=15)
     if resp.status_code not in (200, 204):
         print(f"Discord webhook error {resp.status_code}: {resp.text}", flush=True)
     time.sleep(1.5)
@@ -1016,23 +1072,23 @@ def main():
                 )
                 conn.commit()
 
-                if ev.fit_verdict != "SKIP" and ev.overall_score >= 7:
+                if ev.fit_verdict != "SKIP" and ev.overall_score >= 6:
                     matches.append((ev, job))
         time.sleep(3)
 
     _, updated_quota_status = get_serpapi_budget()
     matches.sort(key=lambda x: x[0].overall_score, reverse=True)
-    for eval_data, job_item in matches[:20]:
+    for eval_data, job_item in matches[:25]:
         send_discord_embed(eval_data, job_item, updated_quota_status, run_date, today)
 
     summary_text = (
         f"📊 **Daily Job Scout ({run_date}):** Evaluated **{evaluated_count}** new jobs "
         f"(AF: {af_count}, Teamtailor: {tt_count}, JobSpy: {js_count}, SerpApi: {serp_count}) • "
-        f"Found **{len(matches)}** matches (7+) • "
+        f"Found **{len(matches)}** matches (6+) • "
         f"SerpApi: **{updated_quota_status}** (used {serp_used} today)"
     )
     requests.post(DISCORD_WEBHOOK_URL, json={"content": summary_text}, timeout=15)
-    print(f"Done. Sent {min(len(matches), 20)} matching jobs to Discord.", flush=True)
+    print(f"Done. Sent {min(len(matches), 25)} matching jobs to Discord.", flush=True)
 
 
 if __name__ == "__main__":

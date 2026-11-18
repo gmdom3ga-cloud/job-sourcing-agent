@@ -37,6 +37,8 @@ AF_QUERIES = [
     {"q": "maskinteknik", "limit": 40},
     {"q": "civilingenjör trainee", "limit": 40},
     {"q": "graduate engineer", "limit": 40},
+    {"q": "graduate program", "limit": 40},
+    {"q": "traineeprogram", "limit": 40},
     {"q": "junior ingenjör", "limit": 40},
     {"q": "nyexaminerad ingenjör", "limit": 40},
     {"q": "trainee ingenjör", "limit": 40},
@@ -84,25 +86,25 @@ JOBSPY_QUERIES = [
         "sites": ["indeed"],
     },
     {
-        "search_term": "quality engineer OR project engineer OR supply chain OR R&D engineer",
+        "search_term": "trainee engineer OR quality engineer OR project engineer OR supply chain",
         "location": "Stockholm, Sweden",
         "country_indeed": "Sweden",
         "sites": ["indeed"],
     },
     {
-        "search_term": "production engineer OR process engineer OR industrial engineer",
+        "search_term": "production engineer OR process engineer OR graduate engineer",
         "location": "Malmö, Sweden",
         "country_indeed": "Sweden",
         "sites": ["indeed"],
     },
     {
-        "search_term": "quality engineer OR project engineer OR supply chain OR operations analyst",
+        "search_term": "trainee OR quality engineer OR project engineer OR supply chain",
         "location": "Malmö, Sweden",
         "country_indeed": "Sweden",
         "sites": ["indeed"],
     },
     {
-        "search_term": "mechanical engineer OR production engineer OR project engineer",
+        "search_term": "mechanical engineer OR production engineer OR graduate OR trainee",
         "location": "Örebro, Sweden",
         "country_indeed": "Sweden",
         "sites": ["indeed"],
@@ -114,55 +116,45 @@ JOBSPY_QUERIES = [
         "sites": ["indeed"],
     },
     {
-        "search_term": "quality engineer OR project engineer OR supply chain OR operations",
+        "search_term": "trainee OR quality engineer OR project engineer OR supply chain",
         "location": "Copenhagen, Denmark",
         "country_indeed": "Denmark",
         "sites": ["indeed"],
     },
     {
-        "search_term": "simulation engineer OR production engineer OR sivilingeniør",
+        "search_term": "simulation engineer OR production engineer OR sivilingeniør OR graduate",
         "location": "Oslo, Norway",
         "country_indeed": "Norway",
         "sites": ["indeed"],
     },
 ]
 
-# 4. Quota-Paced: SerpApi Google X-Ray (Country-Locked gl + Single-Job URLs Only)
+# 4. Quota-Paced: Expanded SerpApi Google X-Ray (Boosted by Tue-Sat Schedule)
 SERPAPI_XRAY_QUERIES = [
     {
-        "q": 'site:linkedin.com/jobs/view ("simulation engineer" OR "production engineer" OR "graduate engineer") (Stockholm OR Malmö OR Örebro)',
+        "q": 'site:linkedin.com/jobs/view ("graduate engineer" OR "graduate program" OR "engineering trainee" OR "traineeprogram") (Stockholm OR Malmö OR Örebro OR Södertälje)',
         "gl": "se",
         "fallback_region": "Sweden",
     },
     {
-        "q": 'site:*.teamtailor.com/jobs ("engineer" OR "ingenjör") (Stockholm OR Malmö OR Örebro OR Västerås OR Södertälje)',
+        "q": 'site:linkedin.com/jobs/view ("simulation engineer" OR "production engineer" OR "process engineer") (Stockholm OR Malmö OR Örebro)',
         "gl": "se",
         "fallback_region": "Sweden",
     },
     {
-        "q": 'site:se.indeed.com/viewjob ("simuleringsingenjör" OR "produktionsingenjör" OR "kvalitetsingenjör" OR "graduate engineer")',
+        "q": 'site:*.teamtailor.com/jobs ("graduate" OR "trainee" OR "junior" OR "engineer" OR "ingenjör") (Stockholm OR Malmö OR Örebro OR Västerås OR Södertälje)',
         "gl": "se",
         "fallback_region": "Sweden",
     },
     {
-        "q": 'site:linkedin.com/jobs/view ("simulation engineer" OR "production engineer" OR "graduate engineer") Copenhagen',
-        "gl": "dk",
-        "fallback_region": "Copenhagen",
+        "q": 'site:se.indeed.com/viewjob ("graduate engineer" OR "trainee" OR "simuleringsingenjör" OR "produktionsingenjör")',
+        "gl": "se",
+        "fallback_region": "Sweden",
     },
     {
-        "q": 'site:jobindex.dk/vis-job ("simulation engineer" OR "production engineer" OR "industrial engineer")',
-        "gl": "dk",
-        "fallback_region": "Copenhagen",
-    },
-    {
-        "q": 'site:linkedin.com/jobs/view ("simulation engineer" OR "production engineer" OR "graduate engineer") Oslo',
-        "gl": "no",
-        "fallback_region": "Oslo",
-    },
-    {
-        "q": 'site:finn.no/job ("simuleringsingeniør" OR "produksjonsingeniør" OR "sivilingeniør" OR "graduate") Oslo',
-        "gl": "no",
-        "fallback_region": "Oslo",
+        "q": 'site:linkedin.com/jobs/view ("junior engineer" OR "nyexaminerad" OR "civilingenjör") (Stockholm OR Malmö OR Örebro OR Västerås)',
+        "gl": "se",
+        "fallback_region": "Sweden",
     },
     {
         "q": 'site:linkedin.com/jobs/view ("quality engineer" OR "project engineer" OR "supply chain" OR "lean engineer") (Stockholm OR Malmö OR Södertälje)',
@@ -170,9 +162,44 @@ SERPAPI_XRAY_QUERIES = [
         "fallback_region": "Sweden",
     },
     {
-        "q": 'site:linkedin.com/jobs/view ("mechanical engineer" OR "process engineer") (Örebro OR Stockholm OR Södertälje)',
+        "q": 'site:linkedin.com/jobs/view ("mechanical engineer" OR "R&D engineer" OR "manufacturing engineer") (Örebro OR Stockholm OR Södertälje)',
         "gl": "se",
         "fallback_region": "Sweden",
+    },
+    {
+        "q": 'site:linkedin.com/jobs/view ("graduate engineer" OR "graduate programme" OR "trainee") Copenhagen',
+        "gl": "dk",
+        "fallback_region": "Copenhagen",
+    },
+    {
+        "q": 'site:linkedin.com/jobs/view ("simulation engineer" OR "production engineer" OR "process engineer") Copenhagen',
+        "gl": "dk",
+        "fallback_region": "Copenhagen",
+    },
+    {
+        "q": 'site:jobindex.dk/vis-job ("graduate" OR "trainee" OR "production engineer" OR "industrial engineer")',
+        "gl": "dk",
+        "fallback_region": "Copenhagen",
+    },
+    {
+        "q": 'site:linkedin.com/jobs/view ("graduate engineer" OR "trainee" OR "sivilingeniør") Oslo',
+        "gl": "no",
+        "fallback_region": "Oslo",
+    },
+    {
+        "q": 'site:linkedin.com/jobs/view ("simulation engineer" OR "production engineer" OR "process engineer") Oslo',
+        "gl": "no",
+        "fallback_region": "Oslo",
+    },
+    {
+        "q": 'site:finn.no/job ("simuleringsingeniør" OR "produksjonsingeniør" OR "sivilingeniør" OR "graduate" OR "trainee") Oslo',
+        "gl": "no",
+        "fallback_region": "Oslo",
+    },
+    {
+        "q": 'site:linkedin.com/jobs/view ("operations analyst" OR "industrial engineer" OR "continuous improvement") (Stockholm OR Malmö OR Copenhagen)',
+        "gl": "se",
+        "fallback_region": "Nordics",
     },
 ]
 
@@ -346,8 +373,7 @@ You are an expert technical recruiter in Scandinavia. Evaluate EVERY numbered jo
 - Oslo Exception: Roles in Oslo are eligible ONLY if `overall_score` is 9 or 10; otherwise set `fit_verdict` to "SKIP".
 - 9-10 (`APPLY`): Graduate/entry-level/trainee (0-2 yrs exp) matching IEM or Mechanical Engineering, simulation, Lean, or operations in target regions.
 - 7-8 (`CONSIDER`): Strong technical match with candidate's tools/projects (2-3+ yrs exp) or solid engineering/quality/project/supply chain role in Primary Regions.
-- 6 (`CONSIDER`): Adjacent entry/mid-level engineering, reliability, R&D, or operations/analyst role in Primary Regions where dual M.Sc. IEM & Mechanical Engineering is a credible fit.
-- 1-5 (`SKIP`): Weak overlap, 5+ yrs senior role, outside target locations, or excluded sector.
+- 1-6 (`SKIP`): Weak overlap, 5+ yrs senior role, outside target locations, or excluded sector.
 """
 
 
@@ -604,6 +630,17 @@ def register_job(
     return True
 
 
+def count_active_scouting_days_left(now: datetime) -> int:
+    """Counts remaining Tue-Sat morning runs in the current month (weekdays 1..5)."""
+    last_day = calendar.monthrange(now.year, now.month)[1]
+    active_days = 0
+    for day_num in range(now.day, last_day + 1):
+        # Python weekday(): Mon=0, Tue=1, Wed=2, Thu=3, Fri=4, Sat=5, Sun=6
+        if date(now.year, now.month, day_num).weekday() in (1, 2, 3, 4, 5):
+            active_days += 1
+    return max(1, active_days)
+
+
 def get_serpapi_budget() -> tuple[int, str]:
     if not SERPAPI_KEY:
         return 0, "SerpApi key not configured"
@@ -623,16 +660,16 @@ def get_serpapi_budget() -> tuple[int, str]:
         spendable = max(0, left - reserve)
 
         now = get_swedish_now()
-        last_day = calendar.monthrange(now.year, now.month)[1]
-        days_left = max(1, last_day - now.day + 1)
+        active_days_left = count_active_scouting_days_left(now)
 
-        daily_budget = 0 if spendable <= 0 else max(1, spendable // days_left)
+        daily_budget = 0 if spendable <= 0 else max(1, spendable // active_days_left)
+        daily_budget = min(daily_budget, len(SERPAPI_XRAY_QUERIES))
         if EVENT_NAME == "workflow_dispatch":
             daily_budget = min(daily_budget, 2)
 
         status = (
             f"{left}/{total} left "
-            f"(15% test reserve: {reserve}, run budget: {daily_budget})"
+            f"(15% reserve: {reserve}, {active_days_left} Tue-Sat runs left, run budget: {daily_budget})"
         )
         return daily_budget, status
     except Exception as e:
@@ -939,12 +976,9 @@ def send_discord_embed(
     if eval_data.overall_score >= 9:
         color = 0x2ECC71
         badge = "🟢 TOP MATCH"
-    elif eval_data.overall_score >= 7:
+    else:
         color = 0xF1C40F
         badge = "🟡"
-    else:
-        color = 0x3498DB
-        badge = "🔵"
 
     apply_url = job.get("apply_url") or "https://arbetsformedlingen.se/platsbanken"
     source_name = job.get("source") or "Job Board"
@@ -1072,7 +1106,7 @@ def main():
                 )
                 conn.commit()
 
-                if ev.fit_verdict != "SKIP" and ev.overall_score >= 6:
+                if ev.fit_verdict != "SKIP" and ev.overall_score >= 7:
                     matches.append((ev, job))
         time.sleep(3)
 
@@ -1084,7 +1118,7 @@ def main():
     summary_text = (
         f"📊 **Daily Job Scout ({run_date}):** Evaluated **{evaluated_count}** new jobs "
         f"(AF: {af_count}, Teamtailor: {tt_count}, JobSpy: {js_count}, SerpApi: {serp_count}) • "
-        f"Found **{len(matches)}** matches (6+) • "
+        f"Found **{len(matches)}** matches (7+) • "
         f"SerpApi: **{updated_quota_status}** (used {serp_used} today)"
     )
     requests.post(DISCORD_WEBHOOK_URL, json={"content": summary_text}, timeout=15)

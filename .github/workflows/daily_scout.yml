@@ -2,7 +2,7 @@ name: Daily Job Scout
 
 on:
   schedule:
-    - cron: '30 6 * * 2-6' # 07:30 CET, Tuesday through Saturday (captures Mon-Fri postings)
+    - cron: '30 6 * * 2-6' # 07:30 CET, tisdag-lördag (fångar mån-fre)
   workflow_dispatch:
 
 permissions:
@@ -29,7 +29,9 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL_ANTHON: ${{ secrets.DISCORD_WEBHOOK_URL_ANTHON }}
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+          SERPAPI_KEY_2: ${{ secrets.SERPAPI_KEY_2 }}
           EVENT_NAME: ${{ github.event_name }}
         run: python main.py
 

@@ -30,7 +30,7 @@ MATIN_DISCORD_USER_ID = "1274373996850184374"          # @grenate6514
 DB_PATH = "seen_jobs.db"
 AF_API_URL = "https://jobsearch.api.jobtechdev.se/search"
 SERPAPI_URL = "https://serpapi.com/search.json"
-BATCH_SIZE = 8
+BATCH_SIZE = 6
 MAX_JOBS_PER_PROFILE = 90
 DB_RETENTION_DAYS = 90
 SERPAPI_TEST_RESERVE_RATIO = 0.15
@@ -80,12 +80,14 @@ ANTHON_ALLOWED_LOCATIONS = STOCKHOLM_LOCATIONS
 
 # --- EXCLUSION KEYWORDS ---
 COMMON_EXCLUDED_KEYWORDS = [
-    # Search/Aggregator Directory Pages & Non-Target Portals
+    # Search/Aggregator Directory Pages, News & Non-Target Portals
     "jobs i ",
     "jobs in ",
     "jobs near",
     "lediga jobb",
     "ziprecruiter",
+    "presskonferens",
+    "redhawks",
     # Seniority & Non-Target IT/Network
     "senior ",
     "linux",
@@ -524,7 +526,6 @@ def init_db() -> sqlite3.Connection:
         "(key TEXT PRIMARY KEY, value INTEGER)"
     )
 
-    # Safe migration from legacy schema (where job_hash was PRIMARY KEY without job_id/profile)
     cols_info = conn.execute("PRAGMA table_info(seen_jobs)").fetchall()
     col_names = {row[1] for row in cols_info}
 
@@ -700,6 +701,19 @@ def is_fuzzy_duplicate(
     return False
 
 
+def is_non_job_landing_title(title: str) -> bool:
+    """Filters out bare municipality/city landing pages like 'Lunds kommun' or 'Västerås - Västerås'."""
+    cleaned = re.sub(r"[^a-zåäöøæ\s]", " ", title.lower())
+    words = [w for w in cleaned.split() if w not in ("kommun", "stad", "region", "län", "county")]
+    unique_words = set(words)
+    if not unique_words:
+        return True
+    all_cities = set(STOCKHOLM_LOCATIONS + NON_STOCKHOLM_LOCATIONS)
+    if unique_words.issubset(all_cities):
+        return True
+    return False
+
+
 def matches_location_list(
     location: str, title: str, description: str, allowed_list: list[str]
 ) -> bool:
@@ -793,7 +807,7 @@ def register_job(
     company = clean_str(raw_item.get("company_name")) or "Unknown"
     location = clean_str(raw_item.get("location"))
     description = clean_str(raw_item.get("description"))
-    if not title:
+    if not title or is_non_job_landing_title(title):
         return False
 
     title_lower = title.lower()
@@ -1172,7 +1186,7 @@ def run_xray_queries(
     return added, used
 
 
-# --- BATCH EVALUATE WITH 4-TIER MODEL FALLBACK ---
+# --- BATCH EVALUATE WITH LOW-THINKING & 4 ACTIVE GEMINI MODELS ---
 def evaluate_batch(
     client: genai.Client,
     batch: list[dict],
@@ -1197,11 +1211,16 @@ def evaluate_batch(
     prompt_text = "\n\n".join(blocks)
 
     models_to_try = (
-        ["gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash-lite"]
+        ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
         if skip_primary
-        else ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash-lite"]
+        else [
+            "gemini-4-hydrogen",
+            "gemini-3.8-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-3.1-flash-lite",
+        ]
     )
-    backoff_seconds = [10, 20, 35, 45]
+    backoff_seconds = [5, 10, 15, 20]
 
     for attempt, model_name in enumerate(models_to_try):
         try:
@@ -1213,6 +1232,7 @@ def evaluate_batch(
                     response_mime_type="application/json",
                     response_schema=BatchEvaluation,
                     temperature=0.2,
+                    thinking_config=types.ThinkingConfig(thinking_level="low"),
                 ),
             )
             evals = response.parsed.evaluations if response.parsed else []
@@ -1222,8 +1242,11 @@ def evaluate_batch(
         except Exception as e:
             err_str = str(e)
             print(f"Attempt {attempt + 1} ({model_name}) failed: {err_str[:140]}", flush=True)
-            if model_name == "gemini-3.8-flash" and "RESOURCE_EXHAUSTED" in err_str:
+            is_404 = "404" in err_str or "NOT_FOUND" in err_str
+            if model_name == "gemini-4-hydrogen" and ("RESOURCE_EXHAUSTED" in err_str or is_404):
                 skip_primary = True
+            if is_404:
+                continue
             time.sleep(backoff_seconds[min(attempt, len(backoff_seconds) - 1)])
     return [], skip_primary
 
@@ -1287,7 +1310,6 @@ def send_discord_embed(
         ],
     }
 
-    # Text first, raw copyable URL on its own line below for both desktop & mobile
     header_tag = ""
     if is_unique_anthon:
         header_tag = f"✨ **UNIKT FÖR ANTHONS SÖKNING** (<@{MATIN_DISCORD_USER_ID}>)\n"
@@ -1340,7 +1362,7 @@ def main():
     today_iso = today.strftime("%Y-%m-%d")
     recent_cutoff = (today - timedelta(days=14)).strftime("%Y-%m-%d")
     run_date = now_cet.strftime("%Y-%m-%d %H:%M CET")
-    client = genai.Client(api_key=GEMINI_API_KEY, http_options={"timeout": 60000})
+    client = genai.Client(api_key=GEMINI_API_KEY, http_options={"timeout": 90000})
 
     budgets = compute_dual_budgets()
     print(
@@ -1369,14 +1391,12 @@ def main():
         matin_seen, matin_pairs, matin_raw, MATIN_ALLOWED_LOCATIONS, MATIN_EXCLUDED_KEYWORDS, JOBSPY_QUERIES
     )
 
-    # Split Matin's SerpApi budget: 75% Non-Stockholm / 25% Stockholm
     m_total_q = budgets["matin_daily"]
     m_sthlm_q = 1 if m_total_q >= 2 else 0
     if m_total_q >= 4:
         m_sthlm_q = max(1, round(m_total_q * 0.25))
     m_non_sthlm_q = max(0, m_total_q - m_sthlm_q)
 
-    # Pull non-Stockholm queries from Key 1 first, then Key 2
     k1_rem = budgets["k1_matin"]
     k2_rem = budgets["k2_matin"]
 
@@ -1394,7 +1414,6 @@ def main():
         matin_seen, matin_pairs, matin_raw, MATIN_ALLOWED_LOCATIONS, MATIN_EXCLUDED_KEYWORDS, "matin"
     )
 
-    # Pull Stockholm queries from remaining Key 1 or Key 2
     use_k1_sthlm = min(k1_rem, m_sthlm_q)
     k1_rem -= use_k1_sthlm
     use_k2_sthlm = min(k2_rem, m_sthlm_q - use_k1_sthlm)
@@ -1433,7 +1452,7 @@ def main():
                 )
                 if ev.fit_verdict != "SKIP" and ev.overall_score >= 7:
                     matin_matches.append((jid, ev, job))
-        time.sleep(3)
+        time.sleep(2)
 
     # =========================================================================
     # PHASE 2: ANTHON'S STOCKHOLM SEARCH (SHARED STOCKHOLM + UNIQUE ANTHON)
@@ -1443,7 +1462,6 @@ def main():
     anthon_shared_candidates = []
     anthon_unique_candidates = []
 
-    # 2A. Inherit all Stockholm jobs already discovered in Matin's run (duplicates allowed)
     matin_hashes_all = {j["hash"] for j in matin_raw}
     for job in matin_raw:
         if is_stockholm_job(job):
@@ -1456,7 +1474,6 @@ def main():
                 ANTHON_EXCLUDED_KEYWORDS,
             )
 
-    # 2B. Fetch Stockholm-specific jobs (including Defense & Sustainability) for Anthon
     af_sthlm_queries = [q for q in AF_QUERIES if "Stockholm" in q["q"] or "Södertälje" in q["q"] or q["limit"] == 40][:18]
     js_sthlm_queries = [q for q in JOBSPY_QUERIES if "Stockholm" in q["location"]]
 
@@ -1474,7 +1491,6 @@ def main():
         ANTHON_ALLOWED_LOCATIONS, ANTHON_EXCLUDED_KEYWORDS, "anthon"
     )
 
-    # Mark true uniqueness (not present in Matin's general pool or Matin's DB history)
     for j in anthon_shared_candidates:
         j["is_unique_anthon"] = False
     for j in anthon_unique_candidates:
@@ -1512,7 +1528,7 @@ def main():
                 )
                 if ev.fit_verdict != "SKIP" and ev.overall_score >= 7:
                     anthon_matches.append((jid, ev, job))
-        time.sleep(3)
+        time.sleep(2)
 
     # =========================================================================
     # PHASE 3: DELIVER TO MATIN'S & ANTHON'S DISCORD CHANNELS
@@ -1520,7 +1536,6 @@ def main():
     updated_budgets = compute_dual_budgets()
     quota_footer = updated_budgets["status_summary"]
 
-    # 3A. Send Matin's Matches
     matin_matches.sort(key=lambda x: x[1].overall_score, reverse=True)
     for jid, ev, job_item in matin_matches[:25]:
         send_discord_embed(
@@ -1535,7 +1550,6 @@ def main():
     )
     requests.post(DISCORD_WEBHOOK_URL_MATIN, json={"content": matin_summary}, timeout=15)
 
-    # 3B. Send Anthon's Matches (Stockholm only; Orange/Blue + @grenate6514 ping if unique)
     if DISCORD_WEBHOOK_URL_ANTHON:
         anthon_matches.sort(key=lambda x: x[1].overall_score, reverse=True)
         unique_hits = sum(1 for _, _, j in anthon_matches if j.get("is_unique_anthon"))
